@@ -1,0 +1,27 @@
+# Dedicated FastMCP Tool Server
+#
+# Serves the versioned tool catalog over MCP/SSE. Authorization is NOT performed
+# here: the Tool Gateway in the API service is the security boundary, so this
+# container must never be reachable from outside the internal network.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN useradd --create-home --uid 10002 mcpuser
+USER mcpuser
+
+EXPOSE 8080
+
+CMD ["python", "-m", "app.tools.serve_mcp", "--host", "0.0.0.0", "--port", "8080"]

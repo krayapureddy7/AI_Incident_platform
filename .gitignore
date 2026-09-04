@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node / frontend
+node_modules/
+build/
+dist/
+coverage/
+
+# Platform runtime artifacts
+# .traces/ holds per-run audit trace JSON, regenerated on every run.
+# .data/ holds the SQLite run catalogue and workflow checkpoints.
+.traces/
+.data/
+
+# Environment
+.env*
+!.env.example
+
+# OS
+.DS_Store
+*.log

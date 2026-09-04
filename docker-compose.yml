@@ -1,0 +1,43 @@
+# Local multi-service stack.
+#
+# The API owns the Tool Gateway, which is the authorization boundary. The MCP
+# tool server is deliberately NOT published to the host: it performs no
+# authorization, so only the API is allowed to reach it.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: incident-api
+    ports:
+      - "8000:8000"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app
+      SQLITE_DB_PATH: /shared/incident_platform.db
+      CHECKPOINT_DB_PATH: /shared/checkpoints.db
+    volumes:
+      - shared-data:/shared
+      - ./.traces:/app/.traces
+    depends_on:
+      - mcp-server
+    restart: unless-stopped
+
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    container_name: fastmcp-tool-server
+    # No `ports:` mapping by design. Reachable only on the internal network,
+    # because this service does not enforce policy.
+    expose:
+      - "8080"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app
+    restart: unless-stopped
+
+# Durable SQLite run catalogue and workflow checkpoints.
+volumes:
+  shared-data:
+    driver: local

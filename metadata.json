@@ -1,0 +1,6 @@
+{
+  "name": "Mini Agentic AI Platform",
+  "description": "Autonomous incident analysis and remediation multi-agent AI platform with FastMCP tool serving, LangGraph state machine, hybrid RAG, deterministic guardrails, and audit traces.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

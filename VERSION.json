@@ -1,0 +1,51 @@
+{
+  "platform_version": "1.4.0",
+  "protocol": "FastMCP",
+  "tool_server_framework": "FastMCP",
+  "components": {
+    "agents": {
+      "planner": "1.2.0",
+      "investigator": "1.4.0",
+      "ops": "1.3.0",
+      "verifier": "1.4.0"
+    },
+    "tools": {
+      "get_logs": "1.1.0",
+      "get_metrics": "1.0.0",
+      "get_dependency_graph": "1.0.0",
+      "simulate_restart": "1.2.0",
+      "simulate_scale": "1.2.0"
+    },
+    "gateway": {
+      "tool_gateway": "2.0.0",
+      "tool_client": "2.0.0"
+    },
+    "knowledge": {
+      "hybrid_rag": "1.2.0",
+      "knowledge_graph": "1.1.0",
+      "corpus": "1.0.0"
+    },
+    "safety": {
+      "guardrails": "1.4.0",
+      "autonomy_tiers": "1.0.0"
+    },
+    "observability": {
+      "tracer": "1.3.0"
+    },
+    "api": {
+      "http_api": "1.0.0"
+    }
+  },
+  "rollback_strategy": {
+    "policy": "Semantic versioning per component. Agents, tool contracts, and safety policy are independently versioned artifacts, so a regression in one is reverted without reverting the others.",
+    "enforcement": "CI job `versioning` runs `python -m tools.check_versions`, which fails the build when a component's declared version drifts from this manifest. A behaviour change therefore cannot merge without an explicit version bump.",
+    "trace_provenance": "Every audit trace records the agent versions that produced it and the `tool_name@version` actually dispatched, so a bad run is attributable to exact artifact versions.",
+    "rollback_procedure": [
+      "1. Identify the offending component and version from the audit trace's `selected_tool_version` and agent version fields.",
+      "2. Revert that component to its previous tag; the structured A2A envelopes and tool envelopes are backwards compatible within a major version, so peers need no change.",
+      "3. Re-run the evaluation gate (`python -m mini_platform.evals.eval_runner`), which must pass before redeploying.",
+      "4. Restore the prior VERSION.json entry so the manifest and the code agree."
+    ],
+    "compatibility_contract": "Structured A2A message envelopes and tool response envelopes are additive within a major version: new optional fields may be added, existing fields are never removed or retyped."
+  }
+}
