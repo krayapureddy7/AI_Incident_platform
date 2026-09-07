@@ -26,7 +26,10 @@ export default function App() {
       <footer className="border-t border-slate-200 bg-white py-4 mt-12">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500 font-mono">
           <div>Mini Agentic AI Platform • Autonomous Production Incident Remediation</div>
-          <div>All Invariant & Contract Tests Passed (22/22) • Evaluation Suite: 100%</div>
+          <div>
+            Every view reads live from the FastAPI backend • Run the Evaluation Suite tab for
+            current invariant results
+          </div>
         </div>
       </footer>
     </div>

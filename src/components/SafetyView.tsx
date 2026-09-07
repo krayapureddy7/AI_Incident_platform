@@ -1,27 +1,29 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { ShieldAlert, Lock, EyeOff, Play, Loader2, AlertTriangle } from "lucide-react";
 import {
-  ShieldAlert,
-  Lock,
-  EyeOff,
-  CheckCircle2,
-  AlertTriangle,
-  Play,
-  RotateCcw,
-  Sparkles,
-} from "lucide-react";
-import { SERVICES_GRAPH } from "../data/platformData";
-import { evaluateSafety, redactSensitiveData } from "../utils/engine";
-import { ActionProposal } from "../types";
+  ApiError,
+  SafetyPreviewResponse,
+  ServiceGraphNode,
+  getHealth,
+  listServices,
+  previewRedaction,
+  previewSafety,
+} from "../utils/apiClient";
 
 export const SafetyView: React.FC = () => {
+  const [nodes, setNodes] = useState<ServiceGraphNode[]>([]);
+  const [sessionEnvironment, setSessionEnvironment] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   // Guardrail tester state
   const [testService, setTestService] = useState<string>("payment-service");
   const [testEnv, setTestEnv] = useState<string>("prod");
-  const [testSessionEnv, setTestSessionEnv] = useState<string>("prod");
   const [testTool, setTestTool] = useState<string>("simulate_restart");
   const [testReplicas, setTestReplicas] = useState<number>(3);
   const [testToken, setTestToken] = useState<string>("");
-  const [evalResult, setEvalResult] = useState<any>(null);
+  const [evalResult, setEvalResult] = useState<SafetyPreviewResponse | null>(null);
+  const [evaluating, setEvaluating] = useState<boolean>(false);
+  const [evalError, setEvalError] = useState<string | null>(null);
 
   // Redaction tester state
   const [rawText, setRawText] = useState<string>(
@@ -40,41 +42,54 @@ export const SafetyView: React.FC = () => {
     )
   );
   const [redactedText, setRedactedText] = useState<string>("");
+  const [redactError, setRedactError] = useState<string | null>(null);
+
+  useEffect(() => {
+    Promise.all([listServices(), getHealth()])
+      .then(([servicesRes, health]) => {
+        setNodes(servicesRes.nodes);
+        setSessionEnvironment(health.session_environment);
+      })
+      .catch((err) => setLoadError(err instanceof ApiError ? err.message : String(err)));
+  }, []);
 
   const handleEvaluateSafety = () => {
-    const mockProposal: ActionProposal = {
-      action_id: "TEST-ACT-" + Math.floor(1000 + Math.random() * 9000),
-      tool_name: testTool,
-      service: testService,
-      environment: testEnv,
-      parameters:
-        testTool === "simulate_scale"
-          ? { service: testService, replicas: testReplicas }
-          : { service: testService, reason: "Manual safety test" },
-      reasoning: "Test of deterministic safety guardrails",
-      evidence_citations: [],
-      rejected_alternatives: [],
-      estimated_blast_radius: 2,
-      autonomy_tier: 2,
-    };
+    setEvaluating(true);
+    setEvalError(null);
+    const parameters =
+      testTool === "simulate_scale"
+        ? { service: testService, replicas: testReplicas }
+        : { service: testService, reason: "Manual safety test" };
 
-    const dec = evaluateSafety(mockProposal, testSessionEnv, testToken || undefined);
-    setEvalResult(dec);
+    previewSafety(testTool, testService, testEnv, parameters, testToken || undefined)
+      .then(setEvalResult)
+      .catch((err) => setEvalError(err instanceof ApiError ? err.message : String(err)))
+      .finally(() => setEvaluating(false));
   };
 
   const handleRedact = () => {
+    setRedactError(null);
+    let parsed: Record<string, any>;
     try {
-      const parsed = JSON.parse(rawText);
-      const scrubbed = redactSensitiveData(parsed);
-      setRedactedText(JSON.stringify(scrubbed, null, 2));
+      parsed = JSON.parse(rawText);
     } catch {
-      const scrubbedStr = redactSensitiveData(rawText);
-      setRedactedText(scrubbedStr);
+      setRedactError("Input is not valid JSON.");
+      return;
     }
+    previewRedaction(parsed)
+      .then((res) => setRedactedText(JSON.stringify(res.redacted, null, 2)))
+      .catch((err) => setRedactError(err instanceof ApiError ? err.message : String(err)));
   };
 
   return (
     <div className="space-y-6">
+      {loadError && (
+        <div className="flex items-center gap-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          {loadError}
+        </div>
+      )}
+
       {/* 3-Tier Autonomy Matrix Spec */}
       <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-4">
         <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
@@ -117,12 +132,10 @@ export const SafetyView: React.FC = () => {
                 Guarded Autonomy
               </span>
             </div>
-            <div className="text-xs font-medium text-slate-900">
-              Low Blast Radius Mutations
-            </div>
+            <div className="text-xs font-medium text-slate-900">Low Blast Radius Mutations</div>
             <p className="text-xs text-slate-600">
-              Tools: <code>simulate_restart</code> on tier-1/tier-2 services with ≤ 2 direct dependents.
-              Allowed autonomously ONLY IF all guardrail invariants pass.
+              Tools: <code>simulate_restart</code> on tier-1/tier-2 services with ≤ 2 direct
+              dependents. Allowed autonomously ONLY IF all guardrail invariants pass.
             </p>
           </div>
 
@@ -140,7 +153,8 @@ export const SafetyView: React.FC = () => {
             </div>
             <p className="text-xs text-slate-600">
               Touches Tier-0 (e.g. <code>auth-service</code>), &gt; 2 dependents, or wide scale.
-              Strictly requires cryptographic/session human approval token.
+              Requires an HMAC-signed approval token bound to this exact action, minted out of
+              band (see the CLI's <code>approve --approver</code>) -- never issued from this UI.
             </p>
           </div>
         </div>
@@ -156,11 +170,21 @@ export const SafetyView: React.FC = () => {
             </h3>
           </div>
           <span className="text-xs font-mono text-slate-400">
-            Engine: 6 Deterministic Policy Gates
+            Live from POST /safety/preview -- read-only, never dispatches
           </span>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+        <div className="flex items-center gap-2 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+          <span>
+            Session authority is fixed by the deployment, not by this form:{" "}
+            <strong className="font-mono">
+              {sessionEnvironment ?? "..."}
+            </strong>
+            . Pick a different target environment below to see the isolation barrier reject it.
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div>
             <label className="block text-xs font-medium text-slate-700 mb-1">
               Target Service
@@ -170,9 +194,9 @@ export const SafetyView: React.FC = () => {
               onChange={(e) => setTestService(e.target.value)}
               className="w-full text-xs font-mono rounded-lg border-slate-300 border px-3 py-2 bg-white text-slate-900"
             >
-              {Object.keys(SERVICES_GRAPH).map((svc) => (
-                <option key={svc} value={svc}>
-                  {svc} ({SERVICES_GRAPH[svc].tier})
+              {nodes.map((n) => (
+                <option key={n.id} value={n.id}>
+                  {n.id} ({n.tier})
                 </option>
               ))}
             </select>
@@ -180,7 +204,7 @@ export const SafetyView: React.FC = () => {
 
           <div>
             <label className="block text-xs font-medium text-slate-700 mb-1">
-              Service Environment
+              Proposal's Target Environment
             </label>
             <select
               value={testEnv}
@@ -188,28 +212,12 @@ export const SafetyView: React.FC = () => {
               className="w-full text-xs font-mono rounded-lg border-slate-300 border px-3 py-2 bg-white text-slate-900"
             >
               <option value="prod">prod</option>
-              <option value="staging">staging</option>
+              <option value="staging">staging (mismatch if session is prod)</option>
             </select>
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">
-              Agent Session Environment
-            </label>
-            <select
-              value={testSessionEnv}
-              onChange={(e) => setTestSessionEnv(e.target.value)}
-              className="w-full text-xs font-mono rounded-lg border-slate-300 border px-3 py-2 bg-white text-slate-900"
-            >
-              <option value="prod">prod</option>
-              <option value="staging">staging (mismatch if target is prod)</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">
-              Mutating Tool
-            </label>
+            <label className="block text-xs font-medium text-slate-700 mb-1">Mutating Tool</label>
             <select
               value={testTool}
               onChange={(e) => setTestTool(e.target.value)}
@@ -224,7 +232,7 @@ export const SafetyView: React.FC = () => {
         {testTool === "simulate_scale" && (
           <div>
             <label className="block text-xs font-medium text-slate-700 mb-1">
-              Target Replicas (Invariant: 1 to 6)
+              Target Replicas (Invariant: 1 to 6 for unattended execution)
             </label>
             <input
               type="number"
@@ -244,7 +252,7 @@ export const SafetyView: React.FC = () => {
               type="text"
               value={testToken}
               onChange={(e) => setTestToken(e.target.value)}
-              placeholder="e.g. TOKEN-HUMAN-APPROVED-12345"
+              placeholder="Paste a signed token minted via `mini_platform cli approve --approver ...`"
               className="w-full text-xs font-mono rounded-lg border-slate-300 border px-3 py-1.5 text-slate-900"
             />
           </div>
@@ -252,12 +260,24 @@ export const SafetyView: React.FC = () => {
           <button
             id="run-guardrails-test-btn"
             onClick={handleEvaluateSafety}
-            className="flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 transition-colors self-end shadow-sm"
+            disabled={evaluating}
+            className="flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 transition-colors self-end shadow-sm disabled:opacity-50"
           >
-            <Play className="w-4 h-4 text-emerald-400" />
+            {evaluating ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Play className="w-4 h-4 text-emerald-400" />
+            )}
             Evaluate Guardrails
           </button>
         </div>
+
+        {evalError && (
+          <div className="flex items-center gap-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            {evalError}
+          </div>
+        )}
 
         {/* Evaluation Output */}
         {evalResult && (
@@ -283,9 +303,7 @@ export const SafetyView: React.FC = () => {
               </span>
             </div>
 
-            <div className="text-xs text-slate-700 font-mono">
-              Rationale: <strong>{evalResult.audit_rationale}</strong>
-            </div>
+            <div className="text-xs text-slate-700 font-mono">{evalResult.explanation}</div>
 
             {evalResult.policy_violations.length > 0 && (
               <div className="bg-red-50 border border-red-200 rounded-md p-3 text-xs text-red-800 font-mono">
@@ -297,6 +315,28 @@ export const SafetyView: React.FC = () => {
                 </ul>
               </div>
             )}
+
+            <div className="pt-1">
+              <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                Policy Checks Performed
+              </div>
+              <div className="space-y-1">
+                {evalResult.checks_performed.map((c, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-2 text-[11px] font-mono px-2 py-1 rounded bg-white border border-slate-200"
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                        c.passed ? "bg-emerald-500" : "bg-red-500"
+                      }`}
+                    />
+                    <span className="font-bold text-slate-700">{c.policy}</span>
+                    {c.reason && <span className="text-slate-500 truncate">{c.reason}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         )}
       </div>
@@ -311,7 +351,7 @@ export const SafetyView: React.FC = () => {
             </h3>
           </div>
           <span className="text-xs font-mono text-slate-400">
-            Scrubbing: Passwords, API Keys, JWT Tokens, Emails, CCs
+            Live from POST /safety/redact-preview
           </span>
         </div>
 
@@ -319,7 +359,7 @@ export const SafetyView: React.FC = () => {
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className="text-xs font-medium text-slate-700">
-                Raw Input JSON / Text (Containing Secrets)
+                Raw Input JSON (Containing Secrets)
               </label>
             </div>
             <textarea
@@ -344,6 +384,13 @@ export const SafetyView: React.FC = () => {
             />
           </div>
         </div>
+
+        {redactError && (
+          <div className="flex items-center gap-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            {redactError}
+          </div>
+        )}
 
         <button
           id="scrub-secrets-btn"

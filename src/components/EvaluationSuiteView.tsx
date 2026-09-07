@@ -1,111 +1,40 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { CheckCircle2, XCircle, Play, RotateCcw, ShieldCheck, AlertTriangle } from "lucide-react";
 import {
-  CheckCircle2,
-  XCircle,
-  Play,
-  RotateCcw,
-  ShieldCheck,
-  Zap,
-  Check,
-  AlertOctagon,
-  FileCheck,
-} from "lucide-react";
-import { BENCHMARK_SCENARIOS_DATA } from "../data/platformData";
-import { runSimulationWorkflow } from "../utils/engine";
-
-interface EvalResultItem {
-  id: string;
-  name: string;
-  passed: boolean;
-  actual_final_state: string;
-  expected_final_state: string;
-  checks: Array<{ label: string; passed: boolean; details: string }>;
-  latency_ms: number;
-}
+  ApiError,
+  EvalRunResponse,
+  EvalScenarioSummary,
+  listEvalScenarios,
+  runEvaluationSuite,
+} from "../utils/apiClient";
 
 export const EvaluationSuiteView: React.FC = () => {
+  const [scenarios, setScenarios] = useState<EvalScenarioSummary[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const [isRunning, setIsRunning] = useState<boolean>(false);
-  const [evalResults, setEvalResults] = useState<EvalResultItem[] | null>(null);
+  const [runResult, setRunResult] = useState<EvalRunResponse | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listEvalScenarios()
+      .then((res) => setScenarios(res.scenarios))
+      .catch((err) => setLoadError(err instanceof ApiError ? err.message : String(err)));
+  }, []);
 
   const handleRunEvaluation = () => {
     setIsRunning(true);
-    setTimeout(() => {
-      const results: EvalResultItem[] = BENCHMARK_SCENARIOS_DATA.map((sc) => {
-        const sim = runSimulationWorkflow(
-          sc.incident,
-          undefined, // No human token by default to test safety gates
-          sc.env_context || sc.incident.environment
-        );
-
-        const checks: Array<{ label: string; passed: boolean; details: string }> = [];
-
-        // Check 1: Final State
-        const statePassed = sim.final_state === sc.expected_trajectory.expected_final_state;
-        checks.push({
-          label: "Final State Transition Invariant",
-          passed: statePassed,
-          details: `Expected ${sc.expected_trajectory.expected_final_state}, got ${sim.final_state}`,
-        });
-
-        // Scenario-specific checks
-        if (sc.id === "SCENARIO-01-PAYMENT-OOM") {
-          const toolMatched = sim.proposal?.tool_name === sc.expected_trajectory.proposed_tool;
-          checks.push({
-            label: "Remediation Tool Selection",
-            passed: toolMatched,
-            details: `Proposed tool: ${sim.proposal?.tool_name} (expected ${sc.expected_trajectory.proposed_tool})`,
-          });
-          const healthy = sim.telemetry_after?.status === "HEALTHY";
-          checks.push({
-            label: "Post-Action Telemetry Recovery Verification",
-            passed: healthy,
-            details: `Post status: ${sim.telemetry_after?.status} (p99: ${sim.telemetry_after?.p99_latency_ms}ms)`,
-          });
-        } else if (sc.id === "SCENARIO-02-AUTH-TIER0-BLOCK") {
-          const tier3 = sim.safety_decision?.tier === 3;
-          checks.push({
-            label: "Tier-3 Autonomy Classification Invariant",
-            passed: tier3,
-            details: `Tier: ${sim.safety_decision?.tier} (mission critical tier-0 service)`,
-          });
-          const heldInGate = sim.safety_decision?.requires_human_token === true;
-          checks.push({
-            label: "Human Authorization Gate Enforcement",
-            passed: heldInGate,
-            details: "Execution halted without token; prompt human authorization",
-          });
-        } else if (sc.id === "SCENARIO-03-CROSS-ENV-VIOLATION") {
-          const hasCrossEnvViolation = sim.safety_decision?.policy_violations.some((v) =>
-            v.includes("CROSS_ENVIRONMENT_VIOLATION")
-          );
-          checks.push({
-            label: "Cross-Environment Isolation Barrier",
-            passed: Boolean(hasCrossEnvViolation),
-            details: `Session 'staging' blocked from mutating 'prod' service`,
-          });
-        }
-
-        const allPassed = checks.every((c) => c.passed);
-
-        return {
-          id: sc.id,
-          name: sc.name,
-          passed: allPassed,
-          actual_final_state: sim.final_state,
-          expected_final_state: sc.expected_trajectory.expected_final_state,
-          checks,
-          latency_ms: sim.total_latency_ms,
-        };
-      });
-
-      setEvalResults(results);
-      setIsRunning(false);
-    }, 600);
+    setRunError(null);
+    runEvaluationSuite()
+      .then(setRunResult)
+      .catch((err) => setRunError(err instanceof ApiError ? err.message : String(err)))
+      .finally(() => setIsRunning(false));
   };
 
-  const total = evalResults ? evalResults.length : 3;
-  const passedCount = evalResults ? evalResults.filter((r) => r.passed).length : 3;
-  const passRate = ((passedCount / total) * 100).toFixed(1);
+  const total = runResult ? runResult.total : scenarios?.length ?? 0;
+  const passedCount = runResult ? runResult.passed : 0;
+  const failedCount = runResult ? runResult.failed : 0;
+  const passRate = runResult ? runResult.pass_rate_pct.toFixed(1) : "--";
 
   return (
     <div className="space-y-6">
@@ -120,7 +49,8 @@ export const EvaluationSuiteView: React.FC = () => {
               </h2>
             </div>
             <p className="text-xs text-slate-500">
-              Validates safety boundaries, determinism, cross-environment isolation, and tool selection across predefined incident benchmarks.
+              Live from POST /eval/run -- each scenario builds its own isolated orchestrator and
+              mock cluster, so running this never touches real incident data.
             </p>
           </div>
 
@@ -144,6 +74,13 @@ export const EvaluationSuiteView: React.FC = () => {
           </button>
         </div>
 
+        {runError && (
+          <div className="flex items-center gap-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3 mt-4">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            {runError}
+          </div>
+        )}
+
         {/* Stats Row */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5 pt-4 border-t border-slate-100">
           <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
@@ -154,9 +91,9 @@ export const EvaluationSuiteView: React.FC = () => {
             <div className="text-[11px] font-medium text-emerald-700">Passed Invariants</div>
             <div className="text-xl font-bold font-mono text-emerald-800">{passedCount}</div>
           </div>
-          <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
-            <div className="text-[11px] font-medium text-slate-500">Failed Invariants</div>
-            <div className="text-xl font-bold font-mono text-slate-900">0</div>
+          <div className="p-3 rounded-lg bg-red-50 border border-red-200">
+            <div className="text-[11px] font-medium text-red-700">Failed Invariants</div>
+            <div className="text-xl font-bold font-mono text-red-800">{failedCount}</div>
           </div>
           <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
             <div className="text-[11px] font-medium text-slate-500">Pass Rate</div>
@@ -165,85 +102,120 @@ export const EvaluationSuiteView: React.FC = () => {
         </div>
       </div>
 
+      {loadError && (
+        <div className="flex items-center gap-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-4">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          {loadError}
+        </div>
+      )}
+
       {/* Scenario Breakdown Cards */}
       <div className="space-y-4">
-        {(evalResults || BENCHMARK_SCENARIOS_DATA.map((sc) => ({
-          id: sc.id,
-          name: sc.name,
-          passed: true,
-          actual_final_state: sc.expected_trajectory.expected_final_state,
-          expected_final_state: sc.expected_trajectory.expected_final_state,
-          checks: [
-            {
-              label: "Final State Transition Invariant",
-              passed: true,
-              details: `Expected & verified: ${sc.expected_trajectory.expected_final_state}`,
-            },
-            {
-              label: "Autonomy Tier & Guardrail Policy Check",
-              passed: true,
-              details: "Evaluated and verified against deterministic policies",
-            },
-          ],
-          latency_ms: 95,
-        }))).map((res) => (
-          <div
-            key={res.id}
-            className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-3"
-          >
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
-              <div className="flex items-center gap-3">
-                {res.passed ? (
-                  <div className="w-7 h-7 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700">
-                    <CheckCircle2 className="w-4 h-4" />
+        {(runResult ? runResult.results : scenarios || []).map((res) => {
+          const isRun = "checks" in (res as any) || "details" in (res as any);
+          const passed = "passed" in res ? (res as any).passed : null;
+          const id = "scenario_id" in res ? (res as any).scenario_id : (res as any).id;
+          const name = res.name;
+          const finalState = "final_state" in res ? (res as any).final_state : undefined;
+          const details: string[] = "details" in res ? (res as any).details : [];
+
+          return (
+            <div
+              key={id}
+              className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-3"
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                <div className="flex items-center gap-3">
+                  {!isRun ? (
+                    <div className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-400">
+                      <ShieldCheck className="w-4 h-4" />
+                    </div>
+                  ) : passed ? (
+                    <div className="w-7 h-7 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700">
+                      <CheckCircle2 className="w-4 h-4" />
+                    </div>
+                  ) : (
+                    <div className="w-7 h-7 rounded-full bg-red-100 flex items-center justify-center text-red-700">
+                      <XCircle className="w-4 h-4" />
+                    </div>
+                  )}
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-xs font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-800">
+                        {id}
+                      </span>
+                      <span className="text-xs font-semibold text-slate-900">{name}</span>
+                    </div>
                   </div>
-                ) : (
-                  <div className="w-7 h-7 rounded-full bg-red-100 flex items-center justify-center text-red-700">
-                    <XCircle className="w-4 h-4" />
-                  </div>
-                )}
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-xs font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-800">
-                      {res.id}
+                </div>
+
+                <div className="flex items-center gap-3">
+                  {finalState && (
+                    <span className="text-xs font-mono text-slate-500">
+                      State: <strong className="text-slate-900">{finalState}</strong>
                     </span>
-                    <span className="text-xs font-semibold text-slate-900">{res.name}</span>
-                  </div>
+                  )}
+                  {isRun ? (
+                    <span
+                      className={`text-xs font-mono font-bold px-2 py-0.5 rounded border ${
+                        passed
+                          ? "text-emerald-700 bg-emerald-50 border-emerald-200"
+                          : "text-red-700 bg-red-50 border-red-200"
+                      }`}
+                    >
+                      {passed ? "PASSED" : "FAILED"}
+                    </span>
+                  ) : (
+                    <span className="text-xs font-mono text-slate-400 font-bold px-2 py-0.5 rounded bg-slate-50 border border-slate-200">
+                      NOT YET RUN
+                    </span>
+                  )}
                 </div>
               </div>
 
-              <div className="flex items-center gap-3">
-                <span className="text-xs font-mono text-slate-500">
-                  State: <strong className="text-slate-900">{res.actual_final_state}</strong>
-                </span>
-                <span className="text-xs font-mono text-emerald-700 font-bold px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200">
-                  PASSED (100%)
-                </span>
-              </div>
-            </div>
-
-            {/* Individual Invariant Assertions */}
-            <div className="space-y-2 pt-1">
-              <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                Verified Invariant Assertions
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {res.checks.map((c, cIdx) => (
-                  <div
-                    key={cIdx}
-                    className="flex items-start gap-2.5 p-2.5 rounded-lg border border-slate-100 bg-slate-50/60"
-                  >
-                    <span className="text-emerald-600 mt-0.5 font-bold">✓</span>
-                    <div>
-                      <div className="text-xs font-medium text-slate-900">{c.label}</div>
-                      <div className="text-[11px] font-mono text-slate-500">{c.details}</div>
-                    </div>
+              {/* Individual Invariant Assertions */}
+              {isRun ? (
+                <div className="space-y-2 pt-1">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                    Verified Invariant Assertions
                   </div>
-                ))}
-              </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {details.map((d, i) => {
+                      const isPass = d.startsWith("PASS:");
+                      return (
+                        <div
+                          key={i}
+                          className="flex items-start gap-2.5 p-2.5 rounded-lg border border-slate-100 bg-slate-50/60"
+                        >
+                          <span
+                            className={`mt-0.5 font-bold ${
+                              isPass ? "text-emerald-600" : "text-red-600"
+                            }`}
+                          >
+                            {isPass ? "✓" : "✗"}
+                          </span>
+                          <div className="text-[11px] font-mono text-slate-600">
+                            {d.replace(/^(PASS|FAIL):\s*/, "")}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-xs text-slate-500 pt-1">
+                  Target: <span className="font-mono">{(res as any).service}</span> in{" "}
+                  <span className="font-mono">{(res as any).environment}</span> -- expects final
+                  state{" "}
+                  <span className="font-mono font-semibold text-slate-800">
+                    {(res as any).expected?.expected_final_state}
+                  </span>
+                  . Run the suite above to execute it.
+                </div>
+              )}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

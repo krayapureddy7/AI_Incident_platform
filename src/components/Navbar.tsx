@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import {
   ShieldAlert,
   Activity,
@@ -8,6 +8,7 @@ import {
   FileText,
   SlidersHorizontal,
 } from "lucide-react";
+import { HealthResponse, getHealth } from "../utils/apiClient";
 
 export type NavTab =
   | "studio"
@@ -23,6 +24,14 @@ interface NavbarProps {
 }
 
 export const Navbar: React.FC<NavbarProps> = ({ activeTab, onTabChange }) => {
+  const [health, setHealth] = useState<HealthResponse | null>(null);
+
+  useEffect(() => {
+    getHealth()
+      .then(setHealth)
+      .catch(() => setHealth(null));
+  }, []);
+
   const tabs: Array<{ id: NavTab; label: string; icon: React.ReactNode }> = [
     { id: "studio", label: "Incident Studio", icon: <Activity className="w-4 h-4" /> },
     { id: "evals", label: "Evaluation Suite", icon: <CheckCircle2 className="w-4 h-4" /> },
@@ -47,25 +56,37 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, onTabChange }) => {
                   Mini Agentic AI Platform
                 </span>
                 <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-medium bg-slate-100 text-slate-700 border border-slate-300">
-                  v1.2.0
+                  {health ? `v${health.platform_version}` : "..."}
                 </span>
               </div>
               <p className="text-xs text-slate-500 font-mono">
-                Protocol: MCP/2024-11-05-local • 4 Agents • FSM Orchestrator
+                Protocol: FastMCP • 4 Agents • FSM Orchestrator
               </p>
             </div>
           </div>
 
           {/* System Status Indicators */}
           <div className="hidden lg:flex items-center gap-3">
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-700 text-xs font-medium border border-emerald-200">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              Evals: 3/3 Passed (100%)
+            <div
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border ${
+                health
+                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                  : "bg-red-50 text-red-700 border-red-200"
+              }`}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  health ? "bg-emerald-500 animate-pulse" : "bg-red-500"
+                }`}
+              />
+              {health ? `API ${health.status} • api v${health.api_version}` : "API unreachable"}
             </div>
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-50 text-slate-700 text-xs font-medium border border-slate-200">
-              <span className="w-2 h-2 rounded-full bg-blue-500" />
-              22 Unit Tests Green
-            </div>
+            {health && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-50 text-slate-700 text-xs font-medium border border-slate-200">
+                <span className="w-2 h-2 rounded-full bg-blue-500" />
+                {health.session_environment} / {health.session_tenant} • {health.persisted_runs} runs
+              </div>
+            )}
           </div>
         </div>
 
