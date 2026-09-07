@@ -256,8 +256,12 @@ Deterministic checks in `SafetyGuardrails.evaluate_proposal`:
    effective limit is the stricter of the platform ceiling and the service's own
    `max_replicas`.
 5. **Autonomy tier classification** — see below.
-6. **Human approval gate** — Tier-3 requires a token with the required prefix
-   *and* an approver identity beyond it.
+6. **Human approval gate** - Tier-3 requires an HMAC-signed token whose payload
+   is bound to this exact action (action id, tool, service, environment, tenant,
+   and a hash of the parameters) and is still inside its validity window. The
+   token prefix is a public constant and carries no authority on its own, so an
+   approval can neither be forged from the format nor replayed onto a different
+   action. See `mini_platform/safety/approval.py`.
 
 ### Tier rules
 

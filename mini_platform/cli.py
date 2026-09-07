@@ -28,6 +28,11 @@ from .models import Incident
 from .orchestrator.state_machine import IncidentOrchestrator, OrchestrationException
 from .orchestrator.checkpointing import DEFAULT_CHECKPOINT_DB
 from .persistence.store import DEFAULT_DB_PATH, IncidentStore
+from .safety.approval import (
+    DEFAULT_TTL_SECONDS as APPROVAL_DEFAULT_TTL_SECONDS,
+    ApprovalTokenError,
+    mint_approval_token,
+)
 from .tools.mcp_server import TOOL_SERVER
 from .tracing.tracer import TraceReplayer
 
@@ -101,7 +106,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "approve", help="Resume a held Tier-3 run with a human approval token"
     )
     approve_parser.add_argument("--run-id", required=True, help="Run id to resume")
-    approve_parser.add_argument("--token", required=True, help="Human approval token")
+    approve_parser.add_argument(
+        "--token",
+        default=None,
+        help="Signed human approval token. Omit and pass --approver to mint one here.",
+    )
+    approve_parser.add_argument(
+        "--approver",
+        default=None,
+        help=(
+            "Mint an approval for the held proposal as this identity, instead of "
+            "supplying --token. Requires the signing secret in this process."
+        ),
+    )
+    approve_parser.add_argument(
+        "--ttl",
+        type=int,
+        default=APPROVAL_DEFAULT_TTL_SECONDS,
+        help=f"Validity window in seconds for a minted token (default {APPROVAL_DEFAULT_TTL_SECONDS})",
+    )
 
     replay_parser = subparsers.add_parser("replay", help="Replay a persisted audit trace")
     replay_group = replay_parser.add_mutually_exclusive_group(required=True)
@@ -131,6 +154,43 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--reload", action="store_true", help="Enable auto-reload")
 
     return parser
+
+
+def _mint_for_held_run(
+    orchestrator: IncidentOrchestrator, run_id: str, approver: str, ttl: int
+) -> Optional[str]:
+    """
+    Mint an approval bound to the proposal a held run is actually waiting on.
+
+    The operator approves a concrete action, not a run id, so the proposal is
+    read back from the checkpoint and signed as-is. Minting happens here rather
+    than behind an API endpoint because the signing secret belongs to the
+    approver's environment -- an endpoint that minted on request would hand out
+    the very authority the token exists to prove.
+    """
+    snapshot = orchestrator.get_checkpoint_state(run_id)
+    if not snapshot:
+        print(f"No active checkpoint for run '{run_id}'.", file=sys.stderr)
+        return None
+
+    proposal = snapshot.get("values", {}).get("proposal")
+    if not proposal:
+        print(f"Run '{run_id}' has no proposal awaiting approval.", file=sys.stderr)
+        return None
+
+    try:
+        token = mint_approval_token(proposal, approver=approver, ttl_seconds=ttl)
+    except ApprovalTokenError as exc:
+        print(f"Cannot mint an approval for run '{run_id}': {exc}", file=sys.stderr)
+        return None
+
+    print(
+        f"Minted approval for {proposal.get('tool_name')} on "
+        f"{proposal.get('service')} (action {proposal.get('action_id')}), "
+        f"valid {ttl}s, approver '{approver}'.",
+        file=sys.stderr,
+    )
+    return token
 
 
 def _orchestrator(args: argparse.Namespace) -> IncidentOrchestrator:
@@ -181,9 +241,23 @@ def main(argv: Optional[list] = None) -> int:
     if args.command == "approve":
         # Durable checkpoints make this work across processes; see
         # TRADE_OFFS.md section 2.1 for the distributed hardening path.
+        orchestrator = _orchestrator(args)
+
+        token = args.token
+        if not token:
+            if not args.approver:
+                print(
+                    "Supply either --token, or --approver to mint one for the held action.",
+                    file=sys.stderr,
+                )
+                return 2
+            token = _mint_for_held_run(orchestrator, args.run_id, args.approver, args.ttl)
+            if token is None:
+                return 2
+
         try:
-            result = _orchestrator(args).resume_incident(
-                run_id=args.run_id, human_approval_token=args.token
+            result = orchestrator.resume_incident(
+                run_id=args.run_id, human_approval_token=token
             )
         except OrchestrationException as exc:
             print(f"Cannot resume '{args.run_id}': {exc}", file=sys.stderr)

@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from mini_platform.api.server import create_app
 from mini_platform.persistence.store import IncidentStore
+from mini_platform.safety.approval import mint_approval_token
 
 from conftest import build_isolated_orchestrator
 
@@ -102,7 +103,11 @@ class TestIncidentLifecycle(ApiTestCase):
 
         resp = self.client.post(
             f"/incidents/{submit['run_id']}/approve",
-            json={"human_approval_token": "TOKEN-HUMAN-APPROVED-API-SRE-1"},
+            json={
+                "human_approval_token": mint_approval_token(
+                    submit["proposal"], approver="api-sre-1"
+                )
+            },
         )
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -110,9 +115,30 @@ class TestIncidentLifecycle(ApiTestCase):
         self.assertEqual(body["final_state"], "COMPLETED")
         self.assertEqual(self.orchestrator.tool_gateway.mutating_call_count, 1)
 
-    def test_cross_environment_request_is_rejected(self):
+    def test_unsigned_approval_over_http_is_refused(self):
+        """The public token prefix must not be enough to release a held run."""
+        submit = self.client.post(
+            "/incidents",
+            json=self._payment_incident(
+                title="Auth saturation",
+                description="auth-service CPU 94% with redis timeouts",
+                service="auth-service",
+            ),
+        ).json()
+        self.assertEqual(submit["status"], "BLOCKED_FOR_APPROVAL")
+
         resp = self.client.post(
-            "/incidents", json=self._payment_incident(env_context="staging")
+            f"/incidents/{submit['run_id']}/approve",
+            json={"human_approval_token": "TOKEN-HUMAN-APPROVED-API-SRE-1"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotEqual(resp.json()["status"], "RESOLVED")
+        self.assertEqual(self.orchestrator.tool_gateway.mutating_call_count, 0)
+
+    def test_cross_environment_request_is_rejected(self):
+        """A prod-scoped deployment refuses an incident aimed at staging."""
+        resp = self.client.post(
+            "/incidents", json=self._payment_incident(environment="staging")
         )
         self.assertEqual(resp.status_code, 201)
         body = resp.json()
@@ -124,12 +150,37 @@ class TestIncidentLifecycle(ApiTestCase):
 
     def test_cross_tenant_request_is_rejected(self):
         resp = self.client.post(
-            "/incidents",
-            json=self._payment_incident(tenant="tenant-b", tenant_context="tenant-a"),
+            "/incidents", json=self._payment_incident(tenant="tenant-b")
         )
         body = resp.json()
         self.assertEqual(body["status"], "REJECTED")
         self.assertIn("CROSS_TENANT_VIOLATION", body["safety_result"]["policy_violations"][0])
+
+    def test_request_body_cannot_widen_session_authority(self):
+        """
+        The environment barrier compares the proposal's target against the
+        deployment's authority. If a caller could supply both sides it would
+        only ever compare a value to itself, so the barrier has to ignore any
+        session fields the request tries to smuggle in.
+        """
+        resp = self.client.post(
+            "/incidents",
+            json=self._payment_incident(
+                environment="staging", env_context="staging", tenant_context="tenant-b"
+            ),
+        )
+        self.assertEqual(resp.status_code, 201)
+        body = resp.json()
+        self.assertEqual(body["status"], "REJECTED")
+        self.assertIn(
+            "CROSS_ENVIRONMENT_VIOLATION", body["safety_result"]["policy_violations"][0]
+        )
+        self.assertEqual(self.orchestrator.tool_gateway.mutating_call_count, 0)
+
+    def test_health_publishes_session_authority(self):
+        body = self.client.get("/health").json()
+        self.assertEqual(body["session_environment"], "prod")
+        self.assertEqual(body["session_tenant"], "default")
 
     def test_approval_of_unknown_run_returns_404(self):
         resp = self.client.post(

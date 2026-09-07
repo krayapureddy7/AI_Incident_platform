@@ -10,6 +10,7 @@ import unittest
 
 from mini_platform.models import Incident
 from mini_platform.persistence.store import IncidentStore
+from mini_platform.safety.approval import mint_approval_token
 from mini_platform.tracing.tracer import TraceReplayer
 
 from conftest import build_isolated_orchestrator
@@ -284,7 +285,8 @@ class TestDurableCheckpointing(unittest.TestCase):
         # A completely separate orchestrator, as a separate process would build.
         second = self._orchestrator()
         resumed = second.resume_incident(
-            run_id=run_id, human_approval_token="TOKEN-HUMAN-APPROVED-SRE-CROSS"
+            run_id=run_id,
+            human_approval_token=mint_approval_token(held["proposal"], approver="sre-cross"),
         )
         self.assertEqual(resumed["status"], "RESOLVED")
         self.assertEqual(resumed["final_state"], "COMPLETED")
@@ -298,5 +300,5 @@ class TestDurableCheckpointing(unittest.TestCase):
 
         with self.assertRaises(OrchestrationException):
             self._orchestrator().resume_incident(
-                run_id="RUN-NEVER-STARTED", human_approval_token="TOKEN-HUMAN-APPROVED-X"
+                run_id="RUN-NEVER-STARTED", human_approval_token="TOKEN-HUMAN-APPROVED-unsigned"
             )

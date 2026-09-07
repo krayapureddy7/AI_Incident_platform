@@ -26,14 +26,15 @@
       "corpus": "1.0.0"
     },
     "safety": {
-      "guardrails": "1.4.0",
+      "guardrails": "1.5.0",
+      "approval_tokens": "1.0.0",
       "autonomy_tiers": "1.0.0"
     },
     "observability": {
       "tracer": "1.3.0"
     },
     "api": {
-      "http_api": "1.0.0"
+      "http_api": "1.1.0"
     }
   },
   "rollback_strategy": {

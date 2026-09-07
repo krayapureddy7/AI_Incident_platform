@@ -9,9 +9,11 @@ reaches the tool layer.
 Each test builds a private cluster/gateway stack so mutations performed by one
 test are invisible to the others.
 """
+import time
 import unittest
 
 from app.tools.contracts import AGENT_TOOL_PERMISSIONS, MUTATING_TOOLS, READ_ONLY_TOOLS
+from mini_platform.safety.approval import mint_approval_token
 
 from conftest import build_isolated_stack
 
@@ -166,23 +168,25 @@ class TestGatewayPolicyBoundaries(unittest.TestCase):
         self.assertTrue(resp["error"]["details"]["requires_human_token"])
 
     def test_tier0_proceeds_with_valid_token(self):
+        proposal = {
+            "action_id": "ACT-TIER0-77",
+            "tool_name": "simulate_restart",
+            "service": "auth-service",
+            "environment": "prod",
+            "tenant": "default",
+            "parameters": {"reason": "Approved tier-0 restart"},
+        }
         resp = self.gateway.execute_proposal(
-            proposal={
-                "tool_name": "simulate_restart",
-                "service": "auth-service",
-                "environment": "prod",
-                "tenant": "default",
-                "parameters": {"reason": "Approved tier-0 restart"},
-            },
+            proposal=proposal,
             env_context="prod",
             caller_role="orchestrator",
-            human_approval_token="TOKEN-HUMAN-APPROVED-SRE-77",
+            human_approval_token=mint_approval_token(proposal, approver="sre-77"),
         )
         self.assertTrue(resp["ok"])
         self.assertEqual(self.gateway.mutating_call_count, 1)
 
     def test_malformed_human_token_is_rejected(self):
-        """A prefix-only token carries no approver identity and must not pass."""
+        """A prefix-only token carries no signature and must not pass."""
         resp = self.gateway.execute_proposal(
             proposal={
                 "tool_name": "simulate_restart",
@@ -192,6 +196,72 @@ class TestGatewayPolicyBoundaries(unittest.TestCase):
             },
             env_context="prod",
             human_approval_token="TOKEN-HUMAN-APPROVED-",
+        )
+        self.assertFalse(resp["ok"])
+        self.assertEqual(self.gateway.mutating_call_count, 0)
+
+    def test_unsigned_token_with_correct_prefix_is_rejected(self):
+        """
+        The token prefix is a public constant. Knowing it must not be enough to
+        approve a Tier-3 mutation on the most critical service in the graph.
+        """
+        resp = self.gateway.execute_proposal(
+            proposal={
+                "action_id": "ACT-FORGED-1",
+                "tool_name": "simulate_restart",
+                "service": "auth-service",
+                "environment": "prod",
+                "parameters": {"reason": "forged approval"},
+            },
+            env_context="prod",
+            caller_role="orchestrator",
+            human_approval_token="TOKEN-HUMAN-APPROVED-looks-plausible-enough",
+        )
+        self.assertFalse(resp["ok"])
+        self.assertEqual(resp["error"]["code"], "AUTONOMY_LIMIT")
+        self.assertEqual(self.gateway.mutating_call_count, 0)
+
+    def test_token_for_one_action_cannot_approve_another(self):
+        """An approval is issued for a specific action, not for a service."""
+        approved = {
+            "action_id": "ACT-APPROVED",
+            "tool_name": "simulate_restart",
+            "service": "auth-service",
+            "environment": "prod",
+            "tenant": "default",
+            "parameters": {"reason": "the action the human actually saw"},
+        }
+        token = mint_approval_token(approved, approver="sre-77")
+
+        # Same service, same tool, different action and arguments.
+        resp = self.gateway.execute_proposal(
+            proposal={**approved, "action_id": "ACT-SUBSTITUTED",
+                      "parameters": {"reason": "something else entirely"}},
+            env_context="prod",
+            caller_role="orchestrator",
+            human_approval_token=token,
+        )
+        self.assertFalse(resp["ok"])
+        self.assertEqual(self.gateway.mutating_call_count, 0)
+
+    def test_expired_token_is_rejected(self):
+        """Approvals are for the incident in hand, not standing authority."""
+        proposal = {
+            "action_id": "ACT-STALE",
+            "tool_name": "simulate_restart",
+            "service": "auth-service",
+            "environment": "prod",
+            "tenant": "default",
+            "parameters": {"reason": "approved an hour ago"},
+        }
+        stale = mint_approval_token(
+            proposal, approver="sre-77", ttl_seconds=60, now=time.time() - 3600
+        )
+        resp = self.gateway.execute_proposal(
+            proposal=proposal,
+            env_context="prod",
+            caller_role="orchestrator",
+            human_approval_token=stale,
         )
         self.assertFalse(resp["ok"])
         self.assertEqual(self.gateway.mutating_call_count, 0)

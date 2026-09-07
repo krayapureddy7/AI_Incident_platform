@@ -182,7 +182,10 @@ BENCHMARK_SCENARIOS: List[Dict[str, Any]] = [
             environment="prod",
             severity="SEV-1",
         ),
-        "human_approval_token": "TOKEN-HUMAN-APPROVED-EVAL-SRE-001",
+        # Approvals are signed against a concrete proposal, so this scenario has
+        # to walk the real flow -- hold, sign the held action, resume -- rather
+        # than presenting a token before the action it authorizes exists.
+        "approval_flow": {"approver": "EVAL-SRE-001"},
         "expected_trajectory": {
             "check": "trajectory",
             "proposed_tool": "simulate_scale",

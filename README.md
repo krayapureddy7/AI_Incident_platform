@@ -109,10 +109,15 @@ python -m mini_platform.cli run --service payment-service \
 python -m mini_platform.cli run --service auth-service \
   --desc "Redis timeout, CPU 94%" --run-id INC-42
 
-# Supply human approval and resume — works from a separate process,
-# because checkpoints are durable
-python -m mini_platform.cli approve --run-id INC-42 \
-  --token TOKEN-HUMAN-APPROVED-SRE-001
+# Supply human approval and resume. Works from a separate process,
+# because checkpoints are durable.
+# The token is signed and bound to the held action, so --approver mints one
+# against the proposal the run is actually waiting on. Set
+# APPROVAL_SIGNING_SECRET when the approver runs in a different process.
+python -m mini_platform.cli approve --run-id INC-42 --approver sre-001
+
+# Or present a token minted elsewhere
+python -m mini_platform.cli approve --run-id INC-42 --token "$APPROVAL_TOKEN"
 
 # Demonstrate cross-environment rejection: target prod from a staging session
 python -m mini_platform.cli run --service payment-service \

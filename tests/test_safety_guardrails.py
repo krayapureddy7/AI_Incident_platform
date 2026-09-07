@@ -3,6 +3,7 @@ Tests for Safety Guardrails, Autonomy Tiers, and Redaction Invariants.
 """
 import unittest
 from mini_platform.models import ActionProposal, AutonomyTier
+from mini_platform.safety.approval import mint_approval_token
 from mini_platform.safety.guardrails import SafetyGuardrails
 from mini_platform.tracing.tracer import redact_sensitive_data
 
@@ -59,7 +60,7 @@ class TestSafetyGuardrails(unittest.TestCase):
         res = self.guardrails.evaluate_proposal(
             proposal,
             env_context="prod",
-            human_approval_token="TOKEN-HUMAN-APPROVED-88219"
+            human_approval_token=mint_approval_token(proposal, approver="sre-88219")
         )
         self.assertTrue(res.approved)
 
@@ -100,3 +101,79 @@ class TestSafetyGuardrails(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestParameterValidation(unittest.TestCase):
+    """
+    Malformed parameters must become policy rejections, never exceptions.
+
+    Parameters arrive from agent output and untrusted callers. A crash inside
+    the policy engine is a fail-open shape: the caller gets an error instead of
+    a denial, and the check that would have rejected the action never runs.
+    """
+
+    def setUp(self):
+        self.guardrails = SafetyGuardrails()
+
+    @staticmethod
+    def _scale(service, replicas):
+        return ActionProposal(
+            action_id="ACT-PARAM",
+            tool_name="simulate_scale",
+            service=service,
+            environment="prod",
+            parameters={"service": service, "replicas": replicas},
+            reasoning="test",
+            evidence_citations=[],
+            estimated_blast_radius=1,
+            autonomy_tier=AutonomyTier.TIER_2_VERIFIED_AUTO,
+        )
+
+    def test_non_integer_replicas_are_rejected_on_a_low_blast_service(self):
+        """
+        order-service is tier-1 with two direct dependents, so it reaches the
+        unattended-scale rule -- the branch that has to read a replica count.
+        """
+        for bad in ("8", 4.5, None, [4], True):
+            with self.subTest(replicas=bad):
+                res = self.guardrails.evaluate_proposal(
+                    self._scale("order-service", bad), env_context="prod"
+                )
+                self.assertFalse(res.approved)
+                self.assertTrue(
+                    any("INVARIANT_VIOLATION" in v for v in res.policy_violations),
+                    res.policy_violations,
+                )
+
+    def test_missing_replicas_is_rejected(self):
+        proposal = self._scale("order-service", 1)
+        proposal.parameters.pop("replicas")
+        res = self.guardrails.evaluate_proposal(proposal, env_context="prod")
+        self.assertFalse(res.approved)
+
+    def test_replica_ceiling_is_enforced(self):
+        res = self.guardrails.evaluate_proposal(
+            self._scale("order-service", 500), env_context="prod"
+        )
+        self.assertFalse(res.approved)
+        self.assertTrue(any("SCALE_CEILING_EXCEEDED" in v for v in res.policy_violations))
+
+    def test_valid_low_replica_scale_is_unattended(self):
+        res = self.guardrails.evaluate_proposal(
+            self._scale("order-service", 4), env_context="prod"
+        )
+        self.assertTrue(res.approved, res.explanation)
+        self.assertEqual(res.tier, AutonomyTier.TIER_2_VERIFIED_AUTO)
+
+    def test_unregistered_tool_is_rejected(self):
+        proposal = self._scale("order-service", 4)
+        proposal.tool_name = "rm_minus_rf"
+        res = self.guardrails.evaluate_proposal(proposal, env_context="prod")
+        self.assertFalse(res.approved)
+        self.assertTrue(any("UNKNOWN_TOOL" in v for v in res.policy_violations))
+
+    def test_non_dict_parameters_do_not_crash_the_engine(self):
+        proposal = self._scale("order-service", 4)
+        proposal.parameters = "not-a-dict"
+        res = self.guardrails.evaluate_proposal(proposal, env_context="prod")
+        self.assertFalse(res.approved)

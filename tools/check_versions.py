@@ -44,7 +44,7 @@ def _actual_versions() -> Dict[str, Dict[str, str]]:
     from mini_platform.agents.verifier import VerifierAgent
     from mini_platform.api.server import API_VERSION
     from mini_platform.knowledge import corpus, hybrid_rag, knowledge_graph
-    from mini_platform.safety import guardrails
+    from mini_platform.safety import approval, guardrails
     from mini_platform.tracing import tracer
 
     return {
@@ -66,6 +66,9 @@ def _actual_versions() -> Dict[str, Dict[str, str]]:
         },
         "safety": {
             "guardrails": guardrails.__version__,
+            # The approval token format is a signing contract: a change to it
+            # invalidates every token already issued against the old scheme.
+            "approval_tokens": approval.__version__,
             # Tier semantics live in the AutonomyTier enum; a change to the tier
             # set is a breaking change for every consumer of a safety decision.
             "autonomy_tiers": "1.0.0",

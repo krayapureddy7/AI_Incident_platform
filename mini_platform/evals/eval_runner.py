@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Tuple
 from app.tools.server import InfraToolServer
 
 from ..orchestrator.state_machine import IncidentOrchestrator
+from ..safety.approval import mint_approval_token
 from ..tools.mock_infrastructure import MockInfrastructureCluster
 from .benchmark_scenarios import BENCHMARK_SCENARIOS
 
@@ -155,6 +156,37 @@ class EvaluationSuite:
             ("cached result returned for duplicate", "cached_result" in second),
         ]
 
+    def _run_approval_flow(
+        self,
+        orchestrator: Any,
+        scenario: Dict[str, Any],
+        env_context: str,
+        tenant_context: str,
+    ) -> Dict[str, Any]:
+        """
+        Exercise the full Tier-3 governance path: hold, sign, resume.
+
+        A signed approval binds to the action id of an existing proposal, so it
+        cannot be presented before the run has produced one. Walking the real
+        two-phase flow is therefore both the only way to approve and a stronger
+        assertion than handing the orchestrator a token up front.
+        """
+        held = orchestrator.run_incident(
+            incident=scenario["incident"],
+            env_context=env_context,
+            tenant_context=tenant_context,
+            human_approval_token=None,
+        )
+
+        proposal = held.get("proposal")
+        if held.get("status") != "BLOCKED_FOR_APPROVAL" or not proposal:
+            return held
+
+        token = mint_approval_token(
+            proposal, approver=scenario["approval_flow"].get("approver", "eval-approver")
+        )
+        return orchestrator.resume_incident(run_id=held["run_id"], human_approval_token=token)
+
     # -- Scenario dispatch --------------------------------------------------
     def _evaluate(self, scenario: Dict[str, Any]) -> Dict[str, Any]:
         """Run one scenario and return its structured result."""
@@ -169,12 +201,17 @@ class EvaluationSuite:
             run_id = "IDEMPOTENCY-CHECK"
             final_state = "IDEMPOTENCY_PROTECTED" if all(p for _, p in checks) else "FAILED"
         else:
-            result = orchestrator.run_incident(
-                incident=incident,
-                env_context=env_context,
-                tenant_context=tenant_context,
-                human_approval_token=scenario.get("human_approval_token"),
-            )
+            if scenario.get("approval_flow"):
+                result = self._run_approval_flow(
+                    orchestrator, scenario, env_context, tenant_context
+                )
+            else:
+                result = orchestrator.run_incident(
+                    incident=incident,
+                    env_context=env_context,
+                    tenant_context=tenant_context,
+                    human_approval_token=scenario.get("human_approval_token"),
+                )
             run_id = result["run_id"]
             final_state = result["final_state"]
 

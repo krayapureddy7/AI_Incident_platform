@@ -12,6 +12,7 @@ import unittest
 from mini_platform.evals.eval_runner import EvaluationSuite
 from mini_platform.models import Incident, AutonomyTier, AgentRole, A2AMessage
 from mini_platform.orchestrator.state_machine import IncidentOrchestrator
+from mini_platform.safety.approval import mint_approval_token
 from conftest import build_isolated_stack
 
 
@@ -149,8 +150,8 @@ class TestEvaluationGate(unittest.TestCase):
         self.assertEqual(checkpoint["values"]["current_state"], "AWAITING_APPROVAL")
         self.assertEqual(checkpoint["values"]["run_id"], run_id)
 
-        # 3. Resume workflow with cryptographic human approval token
-        valid_token = "TOKEN-HUMAN-APPROVED-SR_SRE_991"
+        # 3. Resume with an approval signed against the held proposal itself
+        valid_token = mint_approval_token(res1["proposal"], approver="sre-991")
         res2 = self.orchestrator.resume_incident(run_id=run_id, human_approval_token=valid_token)
         self.assertEqual(res2["final_state"], "COMPLETED")
         self.assertEqual(res2["workflow_status"], "RESOLVED")
