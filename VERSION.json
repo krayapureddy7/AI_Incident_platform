@@ -1,5 +1,5 @@
 {
-  "platform_version": "1.5.0",
+  "platform_version": "1.5.1",
   "protocol": "FastMCP",
   "tool_server_framework": "FastMCP",
   "components": {
@@ -38,6 +38,9 @@
     },
     "observability": {
       "tracer": "1.4.0"
+    },
+    "configuration": {
+      "env_loader": "1.0.0"
     },
     "api": {
       "http_api": "1.1.0"

@@ -184,6 +184,20 @@ cannot kill the thread it started, so a node that overruns leaves its request in
 flight and a retryable node re-issues it. Failing inside the provider means one
 generation is abandoned, not three.
 
+### Configuration
+
+`mini_platform/config.py` loads a `.env` from the repository root when the
+package is imported. It happens at package import rather than in each entrypoint
+because several modules capture configuration into module constants at import
+time (`SQLITE_DB_PATH`, `CHECKPOINT_DB_PATH`, `SESSION_ENVIRONMENT`), so loading
+any later would be too late to affect them.
+
+An existing environment variable is never overwritten. A `.env` must not be able
+to redirect a production run's database path or switch on a paid provider behind
+an operator's back, so the precedence is: real environment, then file, then code
+default. `ENV_FILE=""` disables loading, which is how the test suite stays
+hermetic regardless of a developer's local configuration.
+
 ### Prompts as versioned artifacts
 
 Templates live in `mini_platform/llm/prompts.py` and carry a version

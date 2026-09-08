@@ -8,6 +8,15 @@ order or in parallel.
 """
 from __future__ import annotations
 
+# Keep the suite hermetic. Importing `mini_platform` loads a `.env` from the
+# repository root, and a developer with a live model provider configured there
+# would otherwise have the whole test suite reasoning against a paid API. An
+# empty ENV_FILE disables that load; a test that wants a provider injects one
+# explicitly.
+import os
+
+os.environ.setdefault("ENV_FILE", "")
+
 from typing import Any, Optional, Tuple
 
 import pytest

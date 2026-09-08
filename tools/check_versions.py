@@ -43,6 +43,7 @@ def _actual_versions() -> Dict[str, Dict[str, str]]:
     from mini_platform.agents.planner import PlannerAgent
     from mini_platform.agents.verifier import VerifierAgent
     from mini_platform.api.server import API_VERSION
+    from mini_platform import config as platform_config
     from mini_platform.knowledge import corpus, hybrid_rag, knowledge_graph
     from mini_platform.llm import __version__ as llm_version
     from mini_platform.llm import mock as llm_mock
@@ -87,6 +88,7 @@ def _actual_versions() -> Dict[str, Dict[str, str]]:
             "offline_providers": llm_mock.__version__,
         },
         "observability": {"tracer": tracer.__version__},
+        "configuration": {"env_loader": platform_config.__version__},
         "api": {"http_api": API_VERSION},
     }
 

@@ -53,6 +53,12 @@ the evaluation gate runs offline against a deterministic mock, and a live run is
 
 ### Choosing a reasoning backend
 
+Settings can go in a `.env` beside `.env.example`; it is read at import and is
+gitignored. **A variable already set in the environment always wins**, so a file
+never overrides a container or CI, and `ENV_FILE=""` disables the load entirely
+(which is how the test suite stays off a live provider). Put real keys only in
+`.env` -- `.env.example` is committed.
+
 ```bash
 # Deterministic reasoning (the default: no key, no network)
 python -m mini_platform.demo
@@ -88,7 +94,7 @@ which mode produced it (`mode`, `model`, `prompt_version`, `validation_result`,
 | Knowledge graph | In-memory directed graph, BFS blast-radius traversal |
 | Persistence | **SQLite** (standard library) — run catalogue + audit traces |
 | Reasoning | **Gemini** / **Groq** behind an `LLMProvider` interface; deterministic fallback and offline mock |
-| Tests / eval | **pytest** — 191 tests, 8-scenario eval gate |
+| Tests / eval | **pytest** — 205 tests, 8-scenario eval gate |
 | CI | **GitHub Actions** — tests → eval gate → version manifest check |
 | Containers | **Docker** / docker-compose |
 
@@ -337,6 +343,7 @@ mini_platform/
   agents/               Planner, Investigator, Ops, Verifier + Pydantic schemas
   llm/                  Provider interface, Gemini/Groq adapters, offline mock,
                         versioned prompts
+  config.py             .env loading; environment always outranks the file
   orchestrator/         LangGraph graph, resilience guards, checkpointing
   knowledge/            Hybrid RAG, knowledge graph, corpus
   safety/               Deterministic guardrails and autonomy tiers
@@ -346,7 +353,7 @@ mini_platform/
   api/                  FastAPI application
   cli.py  demo.py
 tools/check_versions.py Version manifest enforcement (CI gate)
-tests/                  191 tests; conftest.py provides isolation helpers
+tests/                  205 tests; conftest.py provides isolation helpers
 src/                    Optional standalone React visualization (see note)
 ```
 

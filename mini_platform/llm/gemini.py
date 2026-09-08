@@ -25,7 +25,7 @@ class GeminiProvider(LLMProvider):
 
     name = "gemini"
 
-    def __init__(self, model: str = "gemini-2.0-flash", **kwargs: Any):
+    def __init__(self, model: str = "gemini-3.5-flash", **kwargs: Any):
         super().__init__(model=model, **kwargs)
         try:
             from google import genai  # type: ignore
@@ -36,7 +36,15 @@ class GeminiProvider(LLMProvider):
             ) from exc
 
         self._genai = genai
-        self._client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        # The HTTP timeout is not optional. Without it the SDK waits
+        # indefinitely, which defeats the whole fallback design: the node's
+        # resilience guard cannot kill the thread it started, so a hung request
+        # would strand the run rather than degrading to deterministic reasoning.
+        # HttpOptions takes milliseconds.
+        self._client = genai.Client(
+            api_key=os.environ["GEMINI_API_KEY"],
+            http_options={"timeout": int(self.timeout_sec * 1000)},
+        )
 
     def _generate(self, prompt: str, schema: Type[BaseModel]) -> Dict[str, Any]:
         # Ask the API for JSON directly. Schema validation still happens in
@@ -48,6 +56,9 @@ class GeminiProvider(LLMProvider):
             config={
                 "response_mime_type": "application/json",
                 "temperature": 0.0,
+                # No tools are exposed to the model, so automatic function
+                # calling has nothing to call and only emits a warning.
+                "automatic_function_calling": {"disable": True},
             },
         )
 

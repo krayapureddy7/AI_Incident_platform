@@ -46,8 +46,15 @@ API_KEY_ENV_VARS = {
 }
 
 #: Default model per provider. Overridable with ``LLM_MODEL``.
+#:
+#: Model ids are retired by vendors on their own schedule -- a request for one
+#: that no longer exists comes back 404, which this platform reports as an
+#: invalid generation and answers by reasoning deterministically. That degrades
+#: safely, but it degrades silently unless someone reads the trace, so these
+#: defaults are worth revisiting when a run shows `fallback:invalid_output`
+#: across every step.
 DEFAULT_MODELS = {
-    "gemini": "gemini-2.0-flash",
+    "gemini": "gemini-3.5-flash",
     "groq": "llama-3.3-70b-versatile",
 }
 
