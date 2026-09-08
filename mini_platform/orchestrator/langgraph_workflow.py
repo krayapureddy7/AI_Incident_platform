@@ -32,6 +32,20 @@ RETRYABLE_NODES = frozenset(
     {"triage", "planner", "investigator", "ops", "verifier", "verify_recovery"}
 )
 
+#: Nodes whose agent may call a language model, and therefore need a wall-clock
+#: budget measured in model latency rather than local computation.
+#:
+#: The budget matters more than it looks. `with_resilience` cannot kill the
+#: thread it started, so a node that overruns leaves its request in flight, and a
+#: retryable node re-issues the call -- meaning a budget set too tight turns one
+#: slow generation into three concurrent ones. These nodes get headroom over the
+#: provider's own `LLM_TIMEOUT_SEC` so the provider fails first, inside the node,
+#: and the agent falls back deterministically instead of being abandoned.
+LLM_BEARING_NODES = frozenset({"planner", "investigator", "ops", "verifier"})
+
+#: Multiplier applied to the base node timeout for LLM-bearing nodes.
+LLM_NODE_TIMEOUT_MULTIPLIER = 3.0
+
 #: Recovery thresholds applied by the post-action healthcheck.
 RECOVERY_MAX_MEMORY_PCT = 75.0
 RECOVERY_MAX_ERROR_RATE_PCT = 1.0
@@ -640,12 +654,20 @@ def build_incident_graph(
     }
 
     for name, body in node_bodies.items():
+        # A node that may wait on a model gets a longer budget than one doing
+        # local computation. Everything else keeps the base timeout, so a hung
+        # tool call is still abandoned as promptly as before.
+        node_timeout = (
+            step_timeout_sec * LLM_NODE_TIMEOUT_MULTIPLIER
+            if name in LLM_BEARING_NODES
+            else step_timeout_sec
+        )
         builder.add_node(
             name,
             with_resilience(
                 body,
                 node=name,
-                timeout_sec=step_timeout_sec,
+                timeout_sec=node_timeout,
                 # Mutating and terminal bookkeeping nodes are never auto-retried.
                 max_retries=max_retries if name in RETRYABLE_NODES else 0,
                 tracer_resolver=_get_tracer,

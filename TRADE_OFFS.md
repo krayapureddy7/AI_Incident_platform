@@ -6,43 +6,59 @@ listing aspirational replacements.
 
 ---
 
-## 1. The largest trade-off: the agents are deterministic, not LLM-driven
+## 1. Hybrid reasoning: where an LLM sits, and where it must never
 
-**What the prototype does.** All four agents are rule-based Python. Symptom
-extraction is keyword matching; root-cause synthesis is threshold logic on
-metrics and log content; remediation selection is a branch on the identified root
-cause; the safety verdict is a deterministic policy matrix.
+**LLM = reasoning and proposals. Deterministic code = workflow control, safety,
+authorization, and execution.**
 
-**Why.** For a system authorized to mutate production, an inspectable and
-reproducible decision path was worth more than natural-language flexibility. It
-also makes the eval gate meaningful: an identical incident always produces an
-identical verdict, so a failing scenario is a real regression rather than
-sampling noise.
+**What the platform does.** The Planner, Investigator and Ops agents reason with
+a language model when one is configured. The Verifier may use one to narrate a
+verdict it did not reach. Everything that decides, authorizes, routes, or
+executes is deterministic Python and is not reachable from a generation.
 
-**What this costs — stated plainly.**
+Three invariants make that division structural rather than a matter of prompt
+discipline:
+
+1. **Every agent output is schema validated before entering graph state.** The
+   symptom and root-cause vocabularies are `Literal` types, so an invented value
+   is a validation failure, not a silent behaviour change. A malformed
+   generation is discarded and the deterministic path runs instead.
+2. **Control flow branches only on deterministic fields.** The routers read
+   `safety_result.approved`, `requires_human_token`, `execution_result.ok`, and
+   `workflow_status`. No generated text is an input to any transition.
+3. **The Verifier and Tool Gateway stay rule-based.** An LLM is never on the
+   authorization path, so a prompt-injected log line cannot talk its way past a
+   blast-radius limit.
+
+**Failure is uneventful by design.** No provider configured, a missing SDK, a
+transport error, a timeout, a schema violation, a hallucinated tool or service, a
+fabricated citation -- each falls back to the rule-based logic and the incident
+is still remediated. The trace records which happened (`mode` is `deterministic`,
+`llm`, or `fallback:<reason>`), so the degradation is visible rather than silent.
+
+**What this costs -- stated plainly.**
 
 | Limitation | Consequence |
 | :--- | :--- |
-| Keyword symptom extraction | An incident phrased outside the keyword sets falls through to `UNKNOWN_DEGRADATION` |
-| Fixed remediation branches | Only restart and scale are reachable; a novel remediation cannot be synthesized |
-| No natural-language synthesis | Reasoning strings are templated, not genuinely explanatory |
-| Token/cost figures | Fixed per-step estimates, **not** measured usage — they demonstrate the trace schema, not real spend |
-| Hashed dense retrieval | Captures term co-occurrence, not semantic similarity; a paraphrased query without shared terms will not match |
+| Live reasoning is non-deterministic | The evaluation gate runs offline against a deterministic mock. A **live** run is not covered by it, and two live runs of the same incident may differ. |
+| Idempotency and approval binding hash the proposal parameters | Model-worded parameters change the hash, so two separate live runs of one incident no longer dedupe as `ALREADY_EXECUTED`. Offline behaviour is unaffected. |
+| Latency and cost | LLM-bearing nodes get 3x the base timeout. A node that overruns is abandoned but its request keeps running (§3.4), and a retryable node re-issues it. |
+| Prompt injection surface | Retrieved logs are attacker-influenced. Prompts mark evidence as untrusted data, but that is defence in depth; the guardrails are the control. |
+| Deterministic fallback is a second implementation | Two reasoning paths per agent must be kept in agreement. The offline mock mirrors the deterministic rules so the suite runs identically either way. |
+| Keyword and threshold fallback | Unchanged when it runs: an incident phrased outside the keyword sets still falls through to `UNKNOWN_DEGRADATION`. |
+| Hashed dense retrieval | Unchanged, and never delegated to a model: retrieval stays BM25 + hashed projection + RRF, and citations are passed through verbatim. |
 
-**Hardening.** Introduce an LLM into the Planner, Investigator, and Ops agents
-only, keeping three properties that already hold:
+**Adversarial coverage.** `tests/test_llm_agents.py` drives a scripted provider
+that returns prose instead of JSON, symptoms and root causes outside the
+vocabulary, a tool that does not exist, scope fields smuggled into parameters, a
+fabricated `doc_id`, a scale request 50x over the ceiling, and a log line
+instructing the agents to bypass policy. Each asserts the same thing: the verdict
+does not move and `mutating_call_count` stays at zero.
 
-1. Every agent output is validated against its Pydantic schema before entering
-   graph state; a malformed generation fails the node rather than propagating.
-2. Control flow branches only on fields produced by the deterministic safety
-   engine, so no generated text can route the workflow.
-3. The Verifier and Tool Gateway stay rule-based. **An LLM must never be on the
-   authorization path** — a prompt-injected log line must not be able to talk its
-   way past a blast-radius limit.
-
-Then add generation-specific evals: schema-conformance rate, citation
-groundedness (does the cited `doc_id` actually support the proposal?), and
-adversarial prompt-injection scenarios seeded into log content.
+**Still missing.** Groundedness scoring on citations (does the cited document
+actually support the proposal, as opposed to merely existing?), and an eval suite
+that runs against a live model to measure schema-conformance and trajectory
+stability rather than assuming them.
 
 ---
 
@@ -64,15 +80,16 @@ adversarial prompt-injection scenarios seeded into log content.
 
 ## 3. Specific residual weaknesses
 
-### 3.1 Approval tokens are not real credentials
+### 3.1 Approval tokens carry no verified identity
 
-`TOKEN-HUMAN-APPROVED-<id>` is validated on prefix and non-emptiness only. It is
-not signed, not bound to an identity, not scoped to a specific action, and does
-not expire. Anyone able to call the API can mint one.
+Tokens are now HMAC-signed and bound to `(action_id, tool, service, environment,
+tenant, parameter hash)` with an expiry, so the published prefix carries no
+authority and an approval cannot be replayed onto a different action. What is
+still missing is *who*: the `approver` field is a self-declared claim, because
+the API has no authenticated principal (§3.8).
 
-**Harden with:** signed, single-use tokens bound to `(run_id, action_id,
-approver)`, a short TTL, two distinct approvers for tier-0 actions, and rejection
-of a token whose bound action differs from the one being executed.
+**Harden with:** an authenticated identity bound into the signature, two distinct
+approvers for tier-0 actions, and single-use consumption tracked server-side.
 
 ### 3.2 Blast radius trusts declared dependencies
 
@@ -137,14 +154,14 @@ production.
 services and maximum autonomy tier, and audit records carrying the authenticated
 caller.
 
-### 3.9 The frontend is a separate re-implementation
+### 3.9 The frontend has no tests of its own
 
-`src/` is an independent TypeScript re-implementation for visual exploration. It
-does not call the Python backend, so its logic can drift from the platform's and
-is not covered by the Python tests or the eval gate.
+`src/` now consumes the HTTP API, so there is one implementation of record and no
+duplicated engine to drift. It still has no test suite and is not exercised by
+CI, which runs no `npm` step.
 
-**Harden with:** delete the duplicated engine and have the UI consume the HTTP
-API, so there is one implementation of record.
+**Harden with:** component tests against a stubbed API client, and a CI job
+running `tsc --noEmit` plus the build.
 
 ---
 

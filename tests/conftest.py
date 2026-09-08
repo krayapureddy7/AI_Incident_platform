@@ -8,7 +8,7 @@ order or in parallel.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import pytest
 
@@ -37,6 +37,7 @@ def build_isolated_orchestrator(
     store: Optional[IncidentStore] = None,
     max_retries: int = 2,
     step_timeout_sec: float = 15.0,
+    llm_provider: Optional[Any] = None,
 ) -> IncidentOrchestrator:
     """Build an orchestrator over a private cluster and gateway."""
     _, impl, gateway = build_isolated_stack()
@@ -46,6 +47,11 @@ def build_isolated_orchestrator(
         max_retries=max_retries,
         step_timeout_sec=step_timeout_sec,
         store=store,
+        # Left as None the orchestrator resolves a provider from the
+        # environment, so the suite runs deterministically by default and
+        # exercises the LLM path when CI sets LLM_PROVIDER=mock. Tests that need
+        # a specific generation pass a ScriptedProvider explicitly.
+        llm_provider=llm_provider,
     )
 
 

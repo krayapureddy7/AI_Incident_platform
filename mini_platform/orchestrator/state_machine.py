@@ -24,6 +24,7 @@ from ..agents.ops import OpsAgent
 from ..agents.planner import PlannerAgent
 from ..agents.verifier import VerifierAgent
 from ..models import Incident, WorkflowState
+from ..llm import LLMProvider, resolve_provider
 from ..persistence.store import IncidentStore
 from ..tracing.tracer import AuditTracer
 from .checkpointing import build_checkpointer, close_checkpointer
@@ -56,6 +57,7 @@ class IncidentOrchestrator:
         checkpointer: Optional[Any] = None,
         store: Optional[IncidentStore] = None,
         checkpoint_db: Optional[str] = None,
+        llm_provider: Optional[LLMProvider] = None,
     ):
         self.tool_server = tool_server or DEFAULT_TOOL_IMPL
 
@@ -75,11 +77,21 @@ class IncidentOrchestrator:
         self.checkpointer = checkpointer or build_checkpointer(checkpoint_db)
         self.store = store
 
-        # Typed agents exposed as LangGraph nodes. Only the gateway is injected.
-        self.planner = PlannerAgent()
-        self.investigator = InvestigatorAgent(tool_gateway=self.tool_gateway)
-        self.ops = OpsAgent()
-        self.verifier = VerifierAgent()
+        # Reasoning backend, resolved once and shared by every agent. It is held
+        # here rather than in graph state on purpose: LangGraph checkpoints the
+        # whole state dict, and a live HTTP client is not serializable. Nodes
+        # reach it through this orchestrator, the same way they reach the gateway.
+        self.llm_provider = (
+            llm_provider if llm_provider is not None else resolve_provider()
+        )
+
+        # Typed agents exposed as LangGraph nodes.
+        self.planner = PlannerAgent(llm_provider=self.llm_provider)
+        self.investigator = InvestigatorAgent(
+            tool_gateway=self.tool_gateway, llm_provider=self.llm_provider
+        )
+        self.ops = OpsAgent(llm_provider=self.llm_provider)
+        self.verifier = VerifierAgent(llm_provider=self.llm_provider)
 
         self.graph = build_incident_graph(
             self,
@@ -93,10 +105,13 @@ class IncidentOrchestrator:
         """
         Release resources held by the orchestrator.
 
-        Closes the checkpointer's database handle. Safe to call more than once,
-        and a no-op for in-memory checkpointing.
+        Closes the checkpointer's database handle and any client the reasoning
+        provider holds. Safe to call more than once, and a no-op for in-memory
+        checkpointing with no provider configured.
         """
         close_checkpointer(self.checkpointer)
+        if self.llm_provider is not None:
+            self.llm_provider.close()
 
     def __enter__(self) -> "IncidentOrchestrator":
         return self

@@ -2,7 +2,7 @@
 Typed Pydantic schemas for Agent I/O contracts in LangGraph nodes.
 Ensures rigorous schema validation for inputs and outputs between agents.
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -82,6 +82,10 @@ class ActionProposalSchema(BaseModel):
     tool_name: str
     service: str
     environment: str
+    # The Verifier compares this against the session's tenant authority, and the
+    # Tool Gateway rejects a mismatch, so it cannot be omitted from a validated
+    # proposal.
+    tenant: str = "default"
     parameters: Dict[str, Any]
     reasoning: str
     evidence_citations: List[Dict[str, Any]] = Field(default_factory=list)
@@ -117,3 +121,95 @@ class VerifierOutput(BaseModel):
     proposal: Dict[str, Any]
     safety_result: Dict[str, Any]
     verifier_version: str = "1.4.0"
+
+
+# --- LLM reasoning contracts -------------------------------------------------
+#
+# These are the schemas a language model must satisfy before any of its output
+# reaches graph state. They are deliberately narrower than the agent I/O schemas
+# above: where an agent may emit any string, the model is constrained to a closed
+# vocabulary, because downstream code branches on these exact values.
+
+#: Symptom vocabulary the Planner may emit. The Investigator builds its retrieval
+#: query from this list, so an invented symptom would silently change which
+#: runbooks are retrieved.
+SYMPTOM_LITERALS = (
+    "MEMORY_EXHAUSTION_OR_LEAK",
+    "LATENCY_SPIKE_OR_TIMEOUT",
+    "HIGH_ERROR_RATE",
+    "RESOURCE_OR_CONNECTION_STARVATION",
+    "UNKNOWN_DEGRADATION",
+)
+
+#: Root-cause vocabulary the Investigator may emit. The Ops agent dispatches on
+#: these exact strings; an unrecognised value would fall through to the default
+#: branch and silently change the proposed remediation, so the type system
+#: rejects it instead.
+ROOT_CAUSE_LITERALS = (
+    "MEMORY_LEAK_HEAP_EXHAUSTION",
+    "CPU_AND_CONNECTION_SATURATION",
+    "SERVICE_UNRESPONSIVE",
+    "EVIDENCE_UNAVAILABLE",
+)
+
+SymptomLiteral = Literal[
+    "MEMORY_EXHAUSTION_OR_LEAK",
+    "LATENCY_SPIKE_OR_TIMEOUT",
+    "HIGH_ERROR_RATE",
+    "RESOURCE_OR_CONNECTION_STARVATION",
+    "UNKNOWN_DEGRADATION",
+]
+
+RootCauseLiteral = Literal[
+    "MEMORY_LEAK_HEAP_EXHAUSTION",
+    "CPU_AND_CONNECTION_SATURATION",
+    "SERVICE_UNRESPONSIVE",
+    "EVIDENCE_UNAVAILABLE",
+]
+
+
+class LLMPlannerReasoning(BaseModel):
+    """Planner generation: incident triage into a closed symptom vocabulary."""
+
+    symptoms: List[SymptomLiteral] = Field(..., min_length=1)
+    triage_summary: str = Field(..., min_length=1)
+
+
+class LLMDiagnosis(BaseModel):
+    """
+    Investigator generation: root-cause analysis over already-retrieved evidence.
+
+    ``cited_doc_ids`` is checked against the documents actually returned by the
+    Hybrid RAG search. A model that cites a document it was not shown has
+    hallucinated, and the diagnosis is rejected.
+    """
+
+    identified_root_cause: RootCauseLiteral
+    diagnosis_summary: str = Field(..., min_length=1)
+    cited_doc_ids: List[str] = Field(default_factory=list)
+
+
+class LLMRemediationProposal(BaseModel):
+    """
+    Ops generation: the remediation to propose.
+
+    ``tool_name`` and ``service`` are validated against the published tool
+    catalog and the knowledge graph before the proposal is accepted -- the schema
+    only guarantees shape, not that the named tool or service exists.
+    """
+
+    tool_name: str = Field(..., min_length=1)
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+    reasoning: str = Field(..., min_length=1)
+    rejected_alternatives: List[ActionAlternative] = Field(default_factory=list)
+
+
+class LLMRiskNarrative(BaseModel):
+    """
+    Verifier generation: a plain-language reading of a verdict already reached.
+
+    Advisory only. It is produced after the deterministic engine has decided and
+    is never read back into the decision, so it cannot influence the outcome.
+    """
+
+    risk_narrative: str = Field(..., min_length=1)

@@ -13,8 +13,10 @@ from typing import Any, Dict, List, Optional
 
 from ..models import A2AMessage, TraceStep
 
-#: Version of the trace schema and redaction patterns.
-__version__ = "1.3.0"
+#: Version of the trace schema and redaction patterns. 1.4.0 adds reasoning
+#: provenance to every step: how the conclusion was reached, by which model
+#: and prompt, and what the schema validation said.
+__version__ = "1.4.0"
 
 
 # Sensitive value patterns applied to every string written to a trace.
@@ -147,7 +149,14 @@ class AuditTracer:
         estimated_tokens: int = 0,
         cost_usd: float = 0.0,
         decisions: Optional[List[str]] = None,
-        rejected_alternatives: Optional[List[str]] = None
+        rejected_alternatives: Optional[List[str]] = None,
+        mode: str = "deterministic",
+        model: Optional[str] = None,
+        prompt_version: Optional[str] = None,
+        validation_result: Optional[str] = None,
+        usage_in: int = 0,
+        usage_out: int = 0,
+        llm_latency_ms: float = 0.0
     ) -> TraceStep:
         self.total_tokens += estimated_tokens
         self.total_cost_usd += cost_usd
@@ -163,7 +172,14 @@ class AuditTracer:
             estimated_tokens=estimated_tokens,
             estimated_cost_usd=round(cost_usd, 6),
             decisions=decisions or [],
-            rejected_alternatives=rejected_alternatives or []
+            rejected_alternatives=rejected_alternatives or [],
+            mode=mode,
+            model=model,
+            prompt_version=prompt_version,
+            validation_result=validation_result,
+            usage_in=usage_in,
+            usage_out=usage_out,
+            llm_latency_ms=round(llm_latency_ms, 2)
         )
         self.steps.append(step)
         return step
@@ -234,6 +250,17 @@ class TraceReplayer:
                 f"{step.get('estimated_tokens', 0)} tok, "
                 f"${step.get('estimated_cost_usd', 0.0)})"
             )
+            # Reasoning provenance, rendered only when a model was involved, so
+            # a purely deterministic trace reads exactly as it did before.
+            mode = step.get("mode", "deterministic")
+            if mode and mode != "deterministic":
+                lines.append(
+                    f"    [~] Reasoning: {mode}"
+                    f" (model: {step.get('model') or 'n/a'},"
+                    f" prompt: {step.get('prompt_version') or 'n/a'},"
+                    f" usage: {step.get('usage_in', 0)} in / {step.get('usage_out', 0)} out,"
+                    f" validation: {step.get('validation_result') or 'n/a'})"
+                )
             for d in step.get("decisions", []):
                 lines.append(f"    [+] Decision: {d}")
             for r in step.get("rejected_alternatives", []):

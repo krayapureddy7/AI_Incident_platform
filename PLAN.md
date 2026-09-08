@@ -178,3 +178,37 @@ Grew the suite from 49 to 138 tests.
 - Docker: `Dockerfile.mcp` no longer uses a conditional-expression `CMD` that
   silently no-ops; both images run as non-root; the MCP container is deliberately
   **not** published to the host, since it performs no authorization.
+
+---
+
+## Phase 9 — Hybrid LLM reasoning
+
+**Goal.** Let the reasoning agents use a language model without moving any part
+of workflow control, safety, authorization, or execution off the deterministic
+path.
+
+**Constraint held throughout.** With no LLM environment set, behaviour is
+byte-identical to Phase 8. That is what allowed the 168 existing tests and all 8
+eval scenarios to be carried forward unmodified, and it was the acceptance check
+after every step.
+
+| Change | Detail |
+| :--- | :--- |
+| `mini_platform/llm/` | `LLMProvider` interface returning schema-validated `LLMResult`; Gemini and Groq adapters with lazily imported SDKs; deterministic `MockProvider`; `ScriptedProvider` for adversarial tests; versioned prompts |
+| Planner / Investigator / Ops | Existing logic extracted verbatim into a private method, now the fallback. LLM path validates against `Literal`-constrained schemas |
+| Verifier | Verdict unchanged and still deterministic. Optional advisory `risk_narrative`, generated after the verdict and never read back |
+| Retrieval | Untouched. Gateway reads and Hybrid RAG run identically in both modes; citations pass through verbatim |
+| Orchestrator | `llm_provider` injected and held on the orchestrator, never in graph state — LangGraph checkpoints state, and a live client is not serializable |
+| Timeouts | Per-node budget map; LLM-bearing nodes get 3x. `resilience.py` unchanged |
+| Tracing | Trace schema 1.4.0 adds `mode`, `model`, `prompt_version`, `validation_result`, `usage_in`, `usage_out`, `llm_latency_ms`. Replay renders them |
+| Tests | `tests/test_llm_agents.py`, 23 cases: malformed output, out-of-vocabulary symptoms and root causes, hallucinated tools/services/citations, smuggled scope fields, a 50x over-ceiling scale, and prompt injection through log content |
+| CI | `LLM_PROVIDER: mock` pinned in `ci.yml`; `run_ci.sh` gained the version-manifest stage it was missing |
+
+**Result.** 191 tests and 8/8 eval scenarios pass in both reasoning modes.
+Verified separately: a provider named without a key falls back cleanly, a
+rejected generation is recorded as `fallback:*`, and replay renders reasoning
+provenance.
+
+**Deliberately not done.** Citation groundedness scoring, and a live-model eval
+suite measuring schema-conformance and trajectory stability. Both are recorded in
+[`TRADE_OFFS.md`](./TRADE_OFFS.md) §1.

@@ -4,30 +4,72 @@ A multi-agent system that analyzes a production incident, plans remediation,
 validates blast radius against policy, executes or withholds the action, and
 produces a replayable audit trace.
 
-Everything runs locally and offline against a simulated cluster. There are no
-API keys, no external services, and no network calls.
+Everything runs locally and offline by default. With no configuration there are
+no API keys, no external services, and no network calls.
 
 ---
 
 ## What this is, precisely
 
-The four agents are **deterministic rule-based components**, not LLM calls. Every
-decision — symptom extraction, root-cause synthesis, remediation choice, and the
-safety verdict — is produced by inspectable Python logic.
+**LLM = reasoning and proposals. Deterministic code = workflow control, safety,
+authorization, and execution.**
 
-That is a deliberate choice for a system that touches production, and it has a
-concrete consequence worth stating up front: the safety verifier is *fully*
-deterministic, so an identical incident always yields an identical verdict, and
-the token/cost figures in traces are fixed per-step estimates rather than
-measured LLM usage.
+The Planner, Investigator and Ops agents reason. When a model provider is
+configured they use it: to classify an incident into symptoms, to diagnose a root
+cause from retrieved evidence, and to propose a remediation. When one is not,
+they fall back to the rule-based logic that has always been here. Either way the
+result is validated against a Pydantic schema before it enters graph state.
 
-The architecture is built so an LLM can be substituted into the Planner,
-Investigator, and Ops agents without weakening the safety story: each agent's
-output is validated against a Pydantic schema, control flow branches only on
-fields produced by the deterministic safety engine, and the Verifier and Tool
-Gateway would remain rule-based regardless. See
-[`TRADE_OFFS.md`](./TRADE_OFFS.md) for where an LLM belongs and where it must
-never be.
+Everything the platform actually *does* is deterministic Python, and stays that
+way:
+
+| Concern | Decided by |
+| :--- | :--- |
+| Symptoms, root cause, proposed action, risk narrative | LLM, where configured |
+| Approve / reject / hold for a human | Deterministic safety engine, always |
+| Autonomy tier and blast radius | Knowledge-graph traversal, always |
+| Which node runs next | LangGraph edges reading engine output, always |
+| Whether a tool may be called | Tool Gateway permission matrix, always |
+| Retrieval ranking | BM25 + dense + RRF, always |
+
+Three properties hold in both modes, and the tests in
+[`tests/test_llm_agents.py`](tests/test_llm_agents.py) assert them against a
+model that is actively trying to misbehave:
+
+1. **A generation is data, never an instruction.** Every agent output is schema
+   validated; a malformed one is discarded and the deterministic path runs
+   instead, so the incident is still remediated.
+2. **Nothing generated can route the workflow.** Branching reads only
+   `safety_result.approved`, `requires_human_token`, and tool envelopes.
+3. **The authorization path has no model on it.** A tool the model invented, a
+   service it made up, a citation it fabricated, or a log line telling it to
+   ignore policy all fail before dispatch -- and a scale beyond the replica
+   ceiling is still rejected by the engine, whatever the proposal argued.
+
+The trade-off this introduces is stated plainly in
+[`TRADE_OFFS.md`](./TRADE_OFFS.md) §1: live reasoning is non-deterministic, so
+the evaluation gate runs offline against a deterministic mock, and a live run is
+*not* covered by it.
+
+### Choosing a reasoning backend
+
+```bash
+# Deterministic reasoning (the default: no key, no network)
+python -m mini_platform.demo
+
+# Same code path as a live model, with canned offline responses. CI uses this.
+LLM_PROVIDER=mock python -m mini_platform.demo
+
+# Live reasoning
+pip install -e ".[llm]"
+export LLM_PROVIDER=gemini GEMINI_API_KEY=...     # or groq / GROQ_API_KEY
+python -m mini_platform.demo
+```
+
+A provider named without its key, or without its SDK installed, resolves back to
+deterministic reasoning rather than failing the run. Every trace step records
+which mode produced it (`mode`, `model`, `prompt_version`, `validation_result`,
+`usage_in`/`usage_out`), so a decision is always attributable.
 
 ---
 
@@ -45,7 +87,8 @@ never be.
 | Fusion | **Reciprocal Rank Fusion** (k=60) |
 | Knowledge graph | In-memory directed graph, BFS blast-radius traversal |
 | Persistence | **SQLite** (standard library) — run catalogue + audit traces |
-| Tests / eval | **pytest** — 138 tests, 8-scenario eval gate |
+| Reasoning | **Gemini** / **Groq** behind an `LLMProvider` interface; deterministic fallback and offline mock |
+| Tests / eval | **pytest** — 191 tests, 8-scenario eval gate |
 | CI | **GitHub Actions** — tests → eval gate → version manifest check |
 | Containers | **Docker** / docker-compose |
 
@@ -162,6 +205,11 @@ uvicorn mini_platform.api.server:app --port 8000
 | `GET` | `/traces/{run_id}/replay` | Human-readable post-mortem replay |
 | `POST` | `/knowledge/search` | Hybrid retrieval with metadata filters |
 | `GET` | `/services/{service}/blast-radius` | Blast-radius assessment |
+| `GET` | `/services` | Service topology as nodes and edges |
+| `POST` | `/tools/{name}/invoke` | Dispatch one read-only tool; 403 for mutating tools |
+| `POST` | `/safety/preview` | Evaluate a hypothetical action; read-only, never dispatches |
+| `POST` | `/safety/redact-preview` | Run a payload through the trace redactor |
+| `GET` | `/eval/scenarios` / `POST` `/eval/run` | Benchmark catalog and evaluation gate |
 
 The API enforces no policy of its own — it delegates to the same orchestrator
 and Tool Gateway as the CLI.
@@ -287,6 +335,8 @@ app/tools/            Tool plane
   serve_mcp.py          Standalone MCP server entry point
 mini_platform/
   agents/               Planner, Investigator, Ops, Verifier + Pydantic schemas
+  llm/                  Provider interface, Gemini/Groq adapters, offline mock,
+                        versioned prompts
   orchestrator/         LangGraph graph, resilience guards, checkpointing
   knowledge/            Hybrid RAG, knowledge graph, corpus
   safety/               Deterministic guardrails and autonomy tiers
@@ -296,14 +346,13 @@ mini_platform/
   api/                  FastAPI application
   cli.py  demo.py
 tools/check_versions.py Version manifest enforcement (CI gate)
-tests/                  138 tests; conftest.py provides isolation helpers
+tests/                  191 tests; conftest.py provides isolation helpers
 src/                    Optional standalone React visualization (see note)
 ```
 
-> **Note on `src/`**: the React app is an independent TypeScript re-implementation
-> of the platform concepts for visual exploration. It does **not** call the Python
-> backend and shares no code with it. The Python packages are the platform; treat
-> the frontend as a separate illustrative artifact.
+> **Note on `src/`**: the React app consumes the HTTP API above -- topology,
+> retrieval, guardrail verdicts, tool invocations and evaluation runs are all
+> served by the Python backend, so there is one implementation of record.
 
 ---
 

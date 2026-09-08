@@ -10,6 +10,10 @@ env:
   PYTHONPATH: .
   # Force UTF-8 so the eval report renders identically across runners.
   PYTHONIOENCODING: utf-8
+  # Reason offline. The provider SDKs are an optional extra and are not
+  # installed here, so this is belt and braces -- but it makes the guarantee
+  # explicit rather than incidental: no CI job may reach a model API.
+  LLM_PROVIDER: mock
 
 jobs:
   test:

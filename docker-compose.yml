@@ -16,6 +16,11 @@ services:
       PYTHONPATH: /app
       SQLITE_DB_PATH: /shared/incident_platform.db
       CHECKPOINT_DB_PATH: /shared/checkpoints.db
+      # Empty means deterministic reasoning, which is what this image supports:
+      # it installs requirements.txt only, and the provider SDKs live in the
+      # `llm` extra. Set this to gemini/groq (with the matching key) only in an
+      # image built with that extra installed.
+      LLM_PROVIDER: "${LLM_PROVIDER:-}"
     volumes:
       - shared-data:/shared
       - ./.traces:/app/.traces

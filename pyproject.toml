@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-agentic-platform"
-version = "1.4.0"
+version = "1.5.0"
 description = "Multi-agent incident remediation platform with LangGraph orchestration, hybrid retrieval, deterministic safety guardrails, and FastMCP tool serving."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,6 +12,10 @@ requires-python = ">=3.11"
 # Every dependency here is imported by the platform. Retrieval, the knowledge
 # graph, and persistence are built on the standard library, so no vector
 # database, embedding model, or graph engine is required to run it.
+#
+# Model provider SDKs are deliberately absent: they live in the `llm` extra, so
+# the default install -- and therefore CI and the container image -- has no
+# network dependency and reasons deterministically.
 dependencies = [
     "langgraph>=0.2.0",
     "langgraph-checkpoint-sqlite>=2.0.0",
@@ -22,6 +26,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Reasoning backends. Install one only if you intend to set LLM_PROVIDER to it;
+# with neither installed the platform runs its deterministic reasoning path.
+llm = [
+    "google-genai>=1.0.0",
+    "groq>=0.11.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -34,7 +44,7 @@ dev = [
 mini-agent-platform = "mini_platform.cli:main"
 
 [tool.setuptools]
-packages = ["app", "app.tools", "mini_platform"]
+packages = ["app", "app.tools", "mini_platform", "mini_platform.llm"]
 
 [tool.pytest.ini_options]
 # `tests` is on the path so test modules can import the shared `conftest`

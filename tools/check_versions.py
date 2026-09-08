@@ -44,6 +44,10 @@ def _actual_versions() -> Dict[str, Dict[str, str]]:
     from mini_platform.agents.verifier import VerifierAgent
     from mini_platform.api.server import API_VERSION
     from mini_platform.knowledge import corpus, hybrid_rag, knowledge_graph
+    from mini_platform.llm import __version__ as llm_version
+    from mini_platform.llm import mock as llm_mock
+    from mini_platform.llm import prompts as llm_prompts
+    from mini_platform.llm import provider as llm_provider
     from mini_platform.safety import approval, guardrails
     from mini_platform.tracing import tracer
 
@@ -72,6 +76,15 @@ def _actual_versions() -> Dict[str, Dict[str, str]]:
             # Tier semantics live in the AutonomyTier enum; a change to the tier
             # set is a breaking change for every consumer of a safety decision.
             "autonomy_tiers": "1.0.0",
+        },
+        "llm": {
+            # Prompts are versioned artifacts in their own right: a prompt change
+            # is a behaviour change, and a trace records which one produced a
+            # decision so a bad run is attributable.
+            "llm_layer": llm_version,
+            "provider_interface": llm_provider.__version__,
+            "prompts": llm_prompts.__version__,
+            "offline_providers": llm_mock.__version__,
         },
         "observability": {"tracer": tracer.__version__},
         "api": {"http_api": API_VERSION},

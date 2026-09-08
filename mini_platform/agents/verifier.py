@@ -2,19 +2,81 @@
 Verifier / Safety Agent: Enforces policies, blast-radius boundaries, and autonomy tiers.
 Runs deterministic policy checks before any mutating tool execution.
 Exposed as a typed Python agent class for LangGraph nodes with Pydantic structured I/O.
+
+Reasoning
+---------
+This agent is hybrid in a deliberately lopsided way. The verdict -- approved,
+tier, whether a human must sign off -- comes from `SafetyGuardrails` and nothing
+else. A language model, where configured, is asked afterwards to put that verdict
+into plain language for the on-call engineer.
+
+The narrative is advisory by construction, not by policy: it is generated after
+`evaluate_proposal` has returned, it is never read back into the decision, and the
+graph's routing predicate reads only `approved` and `requires_human_token`. A
+model cannot approve an action here, and a prompt-injected log line cannot argue
+its way past a blast-radius limit, because nothing it emits is an input to the
+verdict.
 """
 import time
-from typing import Dict, Any
+from typing import Any, Dict, Optional, Tuple
 from .base import BaseAgent
-from .schemas import VerifierInput, VerifierOutput
+from .schemas import LLMRiskNarrative, VerifierInput, VerifierOutput
+from ..llm import LLMProvider, resolve_provider, trace_kwargs
+from ..llm.prompts import VERIFIER_PROMPT_VERSION, verifier_prompt
 from ..models import AgentRole, A2AMessage, MessageType, ActionProposal, AutonomyTier
 from ..safety.guardrails import GLOBAL_SAFETY_GUARDRAILS, SafetyGuardrails
 
+#: Per-step usage recorded when reasoning deterministically.
+DETERMINISTIC_TOKENS = 380
+DETERMINISTIC_COST_USD = 0.00076
+
 
 class VerifierAgent(BaseAgent):
-    def __init__(self, version: str = "1.4.0", guardrails: SafetyGuardrails = None):
+    def __init__(
+        self,
+        version: str = "1.5.0",
+        guardrails: SafetyGuardrails = None,
+        llm_provider: Optional[LLMProvider] = None,
+    ):
         super().__init__(role=AgentRole.VERIFIER, version=version)
         self.guardrails = guardrails or GLOBAL_SAFETY_GUARDRAILS
+        self.llm = llm_provider if llm_provider is not None else resolve_provider()
+
+    def _narrate(
+        self, proposal_dict: Dict[str, Any], safety_result_dict: Dict[str, Any]
+    ) -> Tuple[Optional[str], Dict[str, Any], str]:
+        """
+        Explain a verdict that has already been reached.
+
+        Returns ``(narrative, trace_kwargs, mode)``. Failure is uneventful: with
+        no narrative the run proceeds on the same verdict it would have used
+        anyway, because the verdict was never the model's to produce.
+        """
+        if self.llm is None:
+            return (
+                None,
+                trace_kwargs("deterministic", None, DETERMINISTIC_TOKENS, DETERMINISTIC_COST_USD),
+                "deterministic",
+            )
+
+        result = self.llm.complete(
+            prompt=verifier_prompt(proposal_dict, safety_result_dict),
+            schema=LLMRiskNarrative,
+            purpose="verifier_narrative",
+            prompt_version=VERIFIER_PROMPT_VERSION,
+        )
+        if not result.valid or result.parsed is None:
+            mode = "fallback:invalid_output"
+            return (
+                None,
+                trace_kwargs(mode, result, DETERMINISTIC_TOKENS, DETERMINISTIC_COST_USD),
+                mode,
+            )
+        return (
+            result.parsed.risk_narrative,
+            trace_kwargs("llm", result, DETERMINISTIC_TOKENS, DETERMINISTIC_COST_USD),
+            "llm",
+        )
 
     def run_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -74,6 +136,22 @@ class VerifierAgent(BaseAgent):
             for violation in safety_result.policy_violations:
                 rejected.append(f"Rejected action due to violation: {violation}")
 
+        # Narration happens strictly after the verdict, and only when this run
+        # produced one. A resumed run re-enters at the Verifier with a decision
+        # already in state, and re-narrating it would bill a second generation
+        # for an answer that has not changed.
+        safety_result_dict = safety_result.to_dict()
+        narrative = None
+        llm_trace = trace_kwargs(
+            "deterministic", None, DETERMINISTIC_TOKENS, DETERMINISTIC_COST_USD
+        )
+        mode = "deterministic"
+        if not state.get("safety_result"):
+            narrative, llm_trace, mode = self._narrate(proposal_dict, safety_result_dict)
+        if narrative:
+            safety_result_dict["risk_narrative"] = narrative
+            decisions.append(f"Risk narrative ({mode}): {narrative}")
+
         duration_ms = (time.time() - start_time) * 1000.0
         if tracer:
             tracer.record_step(
@@ -82,18 +160,17 @@ class VerifierAgent(BaseAgent):
                 agent=self.role.value,
                 action="AUDIT_PROPOSAL_SAFETY_AND_BLAST_RADIUS",
                 inputs={"proposal_id": proposal.action_id, "tool": proposal.tool_name, "env_context": env_context},
-                outputs=safety_result.to_dict(),
+                outputs=safety_result_dict,
                 latency_ms=duration_ms,
-                estimated_tokens=380,
-                cost_usd=0.00076,
                 decisions=decisions,
-                rejected_alternatives=rejected
+                rejected_alternatives=rejected,
+                **llm_trace
             )
 
         # Pydantic Structured Output Validation
         validated_output = VerifierOutput(
             proposal=proposal.to_dict(),
-            safety_result=safety_result.to_dict(),
+            safety_result=safety_result_dict,
             verifier_version=self.version
         )
 

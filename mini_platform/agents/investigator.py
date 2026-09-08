@@ -13,16 +13,36 @@ matrix, tenant boundary, and environment boundary apply to reads exactly as
 they do to mutations. Reads are scoped to the *session* environment and tenant
 rather than the values declared on the incident, so a staging session cannot
 read production telemetry by asserting `environment: prod` in the incident.
+
+Reasoning
+---------
+Diagnosis may be performed by a language model, but *retrieval never is*. The
+gateway reads and the Hybrid RAG search below run identically in both modes, and
+the citations they return are passed through untouched. A model is shown the
+retrieved evidence and asked what it means; it cannot choose what to fetch, and a
+document it cites but was not shown is treated as a fabrication.
 """
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.tools.gateway import GLOBAL_TOOL_GATEWAY, ToolGateway
 
 from ..knowledge.hybrid_rag import GLOBAL_HYBRID_RAG, HybridRAG
+from ..llm import LLMProvider, resolve_provider, trace_kwargs
+from ..llm.prompts import INVESTIGATOR_PROMPT_VERSION, investigator_prompt
 from ..models import A2AMessage, AgentRole, MessageType
 from .base import BaseAgent
-from .schemas import InvestigatorEvidence, InvestigatorInput, InvestigatorOutput
+from .schemas import (
+    ROOT_CAUSE_LITERALS,
+    InvestigatorEvidence,
+    InvestigatorInput,
+    InvestigatorOutput,
+    LLMDiagnosis,
+)
+
+#: Per-step usage recorded when reasoning deterministically.
+DETERMINISTIC_TOKENS = 540
+DETERMINISTIC_COST_USD = 0.00108
 
 
 class InvestigatorAgent(BaseAgent):
@@ -30,13 +50,15 @@ class InvestigatorAgent(BaseAgent):
 
     def __init__(
         self,
-        version: str = "1.4.0",
+        version: str = "1.5.0",
         tool_gateway: Optional[ToolGateway] = None,
         rag: Optional[HybridRAG] = None,
+        llm_provider: Optional[LLMProvider] = None,
     ):
         super().__init__(role=AgentRole.INVESTIGATOR, version=version)
         self.tool_gateway = tool_gateway or GLOBAL_TOOL_GATEWAY
         self.rag = rag or GLOBAL_HYBRID_RAG
+        self.llm = llm_provider if llm_provider is not None else resolve_provider()
 
     # -- Evidence collection helpers ---------------------------------------
     @staticmethod
@@ -50,6 +72,125 @@ class InvestigatorAgent(BaseAgent):
             "code": error.get("code", "INTERNAL_ERROR"),
             "message": error.get("message", ""),
         }
+
+    # -- Diagnosis ---------------------------------------------------------
+    @staticmethod
+    def _deterministic_diagnosis(
+        service: str,
+        env: str,
+        evidence: Dict[str, Any],
+        tool_errors: List[Dict[str, Any]],
+    ) -> Tuple[str, str]:
+        """
+        Threshold logic over collected telemetry.
+
+        The fallback path and the offline default. Returns
+        ``(identified_root_cause, diagnosis_summary)``.
+        """
+        metrics = evidence["metrics"]
+        has_oom_log = any(
+            "OutOfMemoryError" in entry.get("message", "")
+            or "memory leak" in entry.get("message", "").lower()
+            for entry in evidence["logs"]
+        )
+        memory_pct = metrics.get("memory_utilization_pct", 0.0) or 0.0
+        cpu_pct = metrics.get("cpu_utilization_pct", 0.0) or 0.0
+        p99_ms = metrics.get("p99_latency_ms", 0) or 0
+
+        if not metrics and not evidence["logs"]:
+            return (
+                "EVIDENCE_UNAVAILABLE",
+                "No telemetry could be collected for "
+                f"'{service}' in environment '{env}'. "
+                f"Blocked reads: {[e['code'] for e in tool_errors]}.",
+            )
+        if has_oom_log or memory_pct > 90.0:
+            return (
+                "MEMORY_LEAK_HEAP_EXHAUSTION",
+                f"Heap memory saturated at {memory_pct}%, p99 latency at {p99_ms}ms, "
+                "OOM error present in logs.",
+            )
+        if cpu_pct > 90.0:
+            return (
+                "CPU_AND_CONNECTION_SATURATION",
+                f"CPU saturated at {cpu_pct}%, high connection pool backpressure.",
+            )
+        return (
+            "SERVICE_UNRESPONSIVE",
+            f"Elevated error rate {metrics.get('error_rate_pct')}% with p99 {p99_ms}ms.",
+        )
+
+    def _diagnose(
+        self,
+        service: str,
+        env: str,
+        symptoms: List[str],
+        evidence: Dict[str, Any],
+        tool_errors: List[Dict[str, Any]],
+    ) -> Tuple[str, str, Dict[str, Any], str]:
+        """
+        Identify the root cause, by model where available and by thresholds otherwise.
+
+        Returns ``(root_cause, summary, trace_kwargs, mode)``.
+
+        A generation is rejected -- and the deterministic result used instead --
+        when it fails schema validation, or when it cites a document that was not
+        in the retrieved set. The second check matters more than it looks: the
+        root cause is the string the Ops agent dispatches on, so a diagnosis
+        justified by a fabricated source would silently select a different
+        remediation.
+        """
+        fallback = lambda: self._deterministic_diagnosis(  # noqa: E731
+            service, env, evidence, tool_errors
+        )
+
+        if self.llm is None:
+            return (
+                *fallback(),
+                trace_kwargs("deterministic", None, DETERMINISTIC_TOKENS, DETERMINISTIC_COST_USD),
+                "deterministic",
+            )
+
+        result = self.llm.complete(
+            prompt=investigator_prompt(
+                service=service,
+                symptoms=symptoms,
+                metrics=evidence["metrics"],
+                logs=evidence["logs"],
+                citations=evidence["citations"],
+                root_cause_vocabulary=list(ROOT_CAUSE_LITERALS),
+            ),
+            schema=LLMDiagnosis,
+            purpose="investigator_diagnosis",
+            prompt_version=INVESTIGATOR_PROMPT_VERSION,
+        )
+
+        mode = "llm"
+        if not result.valid or result.parsed is None:
+            mode = "fallback:invalid_output"
+        else:
+            retrieved_ids = {
+                c.get("doc_id") for c in evidence["citations"] if c.get("doc_id")
+            }
+            invented = [
+                doc_id for doc_id in result.parsed.cited_doc_ids if doc_id not in retrieved_ids
+            ]
+            if invented:
+                mode = "fallback:hallucinated_citation"
+
+        if mode != "llm":
+            return (
+                *fallback(),
+                trace_kwargs(mode, result, DETERMINISTIC_TOKENS, DETERMINISTIC_COST_USD),
+                mode,
+            )
+
+        return (
+            result.parsed.identified_root_cause,
+            result.parsed.diagnosis_summary,
+            trace_kwargs("llm", result, DETERMINISTIC_TOKENS, DETERMINISTIC_COST_USD),
+            "llm",
+        )
 
     def run_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -123,40 +264,18 @@ class InvestigatorAgent(BaseAgent):
             query=rag_query, service_filter=service, top_k=2
         )
 
-        # Diagnostic synthesis over the collected evidence.
+        # Diagnostic synthesis over the collected evidence. Retrieval is already
+        # complete at this point and is not revisited.
         metrics = evidence["metrics"]
-        has_oom_log = any(
-            "OutOfMemoryError" in entry.get("message", "")
-            or "memory leak" in entry.get("message", "").lower()
-            for entry in evidence["logs"]
+        root_cause, summary, llm_trace, mode = self._diagnose(
+            service=service,
+            env=env,
+            symptoms=validated_input.symptoms,
+            evidence=evidence,
+            tool_errors=tool_errors,
         )
-        memory_pct = metrics.get("memory_utilization_pct", 0.0) or 0.0
-        cpu_pct = metrics.get("cpu_utilization_pct", 0.0) or 0.0
-        p99_ms = metrics.get("p99_latency_ms", 0) or 0
-
-        if not metrics and not evidence["logs"]:
-            evidence["identified_root_cause"] = "EVIDENCE_UNAVAILABLE"
-            evidence["diagnosis_summary"] = (
-                "No telemetry could be collected for "
-                f"'{service}' in environment '{env}'. "
-                f"Blocked reads: {[e['code'] for e in tool_errors]}."
-            )
-        elif has_oom_log or memory_pct > 90.0:
-            evidence["identified_root_cause"] = "MEMORY_LEAK_HEAP_EXHAUSTION"
-            evidence["diagnosis_summary"] = (
-                f"Heap memory saturated at {memory_pct}%, p99 latency at {p99_ms}ms, "
-                "OOM error present in logs."
-            )
-        elif cpu_pct > 90.0:
-            evidence["identified_root_cause"] = "CPU_AND_CONNECTION_SATURATION"
-            evidence["diagnosis_summary"] = (
-                f"CPU saturated at {cpu_pct}%, high connection pool backpressure."
-            )
-        else:
-            evidence["identified_root_cause"] = "SERVICE_UNRESPONSIVE"
-            evidence["diagnosis_summary"] = (
-                f"Elevated error rate {metrics.get('error_rate_pct')}% with p99 {p99_ms}ms."
-            )
+        evidence["identified_root_cause"] = root_cause
+        evidence["diagnosis_summary"] = summary
 
         decisions = [
             f"Evidence collected via Tool Gateway: {len(evidence['logs'])} log lines, "
@@ -166,6 +285,8 @@ class InvestigatorAgent(BaseAgent):
             "and dense vector search with RRF fusion.",
             f"Diagnostic synthesis concluded: {evidence['identified_root_cause']}.",
         ]
+        if mode != "deterministic":
+            decisions.append(f"Root-cause reasoning mode: {mode}.")
         if tool_errors:
             decisions.append(
                 "Gateway rejected "
@@ -196,10 +317,9 @@ class InvestigatorAgent(BaseAgent):
                     "tool_errors": tool_errors,
                 },
                 latency_ms=duration_ms,
-                estimated_tokens=540,
-                cost_usd=0.00108,
                 decisions=decisions,
                 rejected_alternatives=rejected,
+                **llm_trace,
             )
 
         # Pydantic structured output validation.

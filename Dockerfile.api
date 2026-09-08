@@ -9,6 +9,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     SQLITE_DB_PATH=/shared/incident_platform.db \
     CHECKPOINT_DB_PATH=/shared/checkpoints.db
 
+# Reasoning backend. The image installs only requirements.txt, which excludes
+# the model provider SDKs, so this container reasons deterministically and makes
+# no outbound calls. To run a live model, install the `llm` extra in a derived
+# image and set LLM_PROVIDER plus the matching API key at runtime.
+ENV LLM_PROVIDER=""
+
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 

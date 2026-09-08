@@ -75,12 +75,15 @@ No agent both diagnoses and executes. Separation of concerns is enforced by the
 permission matrix in [`app/tools/contracts.py`](app/tools/contracts.py), not by
 convention.
 
-| Agent | Version | Responsibility | Inbound | Outbound | Tool access |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Planner** | 1.2.0 | Decomposes incident text into symptoms and discrete diagnostic tasks | `TASK_DELEGATION` | `TASK_DELEGATION` | **none** |
-| **Investigator** | 1.4.0 | Gathers telemetry via the gateway; hybrid-RAG runbook citations | `TASK_DELEGATION` | `EVIDENCE_REPORT` | read-only, session-scoped |
-| **Ops** | 1.3.0 | Synthesizes an `ActionProposal` with rejected alternatives and KG blast radius | `EVIDENCE_REPORT` | `ACTION_PROPOSAL` | **none** |
-| **Verifier** | 1.4.0 | Deterministic policy, blast-radius, tier, and boundary adjudication | `ACTION_PROPOSAL` | `SAFETY_DECISION` | **none** |
+| Agent | Version | Responsibility | Reasoning | Inbound | Outbound | Tool access |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Planner** | 1.3.0 | Decomposes incident text into symptoms and discrete diagnostic tasks | LLM or keywords | `TASK_DELEGATION` | `TASK_DELEGATION` | **none** |
+| **Investigator** | 1.5.0 | Gathers telemetry via the gateway; hybrid-RAG runbook citations | LLM or thresholds, over **deterministically retrieved** evidence | `TASK_DELEGATION` | `EVIDENCE_REPORT` | read-only, session-scoped |
+| **Ops** | 1.4.0 | Synthesizes an `ActionProposal` with rejected alternatives and KG blast radius | LLM or rule dispatch | `EVIDENCE_REPORT` | `ACTION_PROPOSAL` | **none** |
+| **Verifier** | 1.5.0 | Deterministic policy, blast-radius, tier, and boundary adjudication | **Deterministic only**; LLM may narrate the verdict | `ACTION_PROPOSAL` | `SAFETY_DECISION` | **none** |
+
+The Reasoning column is the whole design in one line: a model may decide *what is
+wrong* and *what to try*, and never *what the platform does about it*.
 
 Agents communicate only through validated `A2AMessage` envelopes — never
 free-form text:
@@ -123,7 +126,74 @@ decision to an exact artifact version.
 
 ---
 
-## 3. Control-flow determinism
+## 3. Reasoning layer
+
+**LLM = reasoning and proposals. Deterministic code = workflow control, safety,
+authorization, and execution.**
+
+`mini_platform/llm/` holds a single interface and its adapters:
+
+```
+LLMProvider.complete(prompt, schema, purpose) -> LLMResult
+```
+
+`LLMResult.parsed` is either an instance of the caller's Pydantic schema or
+`None`. Providers never raise -- a transport error, timeout, refusal, or
+unparseable body is reported as an invalid result -- so a vendor outage cannot
+take down a graph node.
+
+| Provider | Selected by | Notes |
+| :--- | :--- | :--- |
+| *(none)* | `LLM_PROVIDER` unset | Deterministic reasoning. The default. |
+| `MockProvider` | `LLM_PROVIDER=mock` | Offline, deterministic, mirrors the rule-based outputs. What CI runs. |
+| `GeminiProvider` | `LLM_PROVIDER=gemini` + `GEMINI_API_KEY` | SDK is an optional extra, imported lazily. |
+| `GroqProvider` | `LLM_PROVIDER=groq` + `GROQ_API_KEY` | Same. |
+| `ScriptedProvider` | tests only | Replays canned or malformed responses. |
+
+### Where the provider lives
+
+On the orchestrator, never in graph state. LangGraph checkpoints the entire
+state dict, and a live HTTP client is not serializable, so the provider is
+reached through the orchestrator closure exactly as the tracer and the Tool
+Gateway are. Adding it to state would break checkpoint resume.
+
+### Fallback
+
+Each reasoning agent holds both paths. The deterministic logic was extracted
+verbatim into a private method and is called when the model is absent or its
+output is rejected:
+
+| Trigger | Recorded `mode` |
+| :--- | :--- |
+| No provider configured | `deterministic` |
+| Non-JSON, or schema violation after retries | `fallback:invalid_output` |
+| Cited a `doc_id` not in the retrieved set | `fallback:hallucinated_citation` |
+| Named a tool outside the published catalog | `fallback:unknown_tool` |
+| Targeted a service absent from the knowledge graph | `fallback:unknown_service` |
+
+The run completes in every case. Falling back here rather than letting the Tool
+Gateway reject the action later is deliberate: a gateway rejection terminates the
+workflow, whereas falling back still remediates the incident.
+
+### Timeouts
+
+LLM-bearing nodes (`planner`, `investigator`, `ops`, `verifier`) get
+`step_timeout_sec * 3`; every other node keeps the base budget. The provider's
+own `LLM_TIMEOUT_SEC` is set below the node budget on purpose -- `with_resilience`
+cannot kill the thread it started, so a node that overruns leaves its request in
+flight and a retryable node re-issues it. Failing inside the provider means one
+generation is abandoned, not three.
+
+### Prompts as versioned artifacts
+
+Templates live in `mini_platform/llm/prompts.py` and carry a version
+(`planner/1.0.0`, …) written into every trace step alongside the model id. A
+prompt change is a behaviour change, so it is versioned and rollback-addressable
+like any other component.
+
+---
+
+## 4. Control-flow determinism
 
 Routing reads **only** structured fields produced by the deterministic safety
 engine or by tool envelopes:
@@ -145,7 +215,7 @@ and would still reach the executor only via a Verifier verdict.
 
 ---
 
-## 4. Tool plane
+## 5. Tool plane
 
 ### Authorization pipeline
 
@@ -214,7 +284,7 @@ Test and evaluation isolation comes from constructing separate stacks
 
 ---
 
-## 5. Knowledge and retrieval
+## 6. Knowledge and retrieval
 
 ### Hybrid RAG
 
@@ -245,7 +315,7 @@ independently recomputes rather than trusting.
 
 ---
 
-## 6. Safety engine
+## 7. Safety engine
 
 Deterministic checks in `SafetyGuardrails.evaluate_proposal`:
 
@@ -278,7 +348,7 @@ no token can approve a cross-environment or cross-tenant action.
 
 ---
 
-## 7. Recovery verification
+## 8. Recovery verification
 
 After a mutation the workflow re-reads metrics *and* logs through the gateway and
 compares against the pre-action baseline. Recovery passes only if **all** hold:
@@ -295,14 +365,16 @@ vacuously. `tests/test_recovery_verification.py` asserts each failure mode.
 
 ---
 
-## 8. Observability
+## 9. Observability
 
 ```
 Workflow (run_id)
   └── State transitions (from, to, trigger, redacted metadata)
   └── Agent steps
         ├── redacted inputs / outputs
-        ├── latency, token and cost estimates
+        ├── latency, token and cost figures
+        ├── reasoning provenance (mode, model, prompt_version,
+        │     validation_result, usage_in / usage_out)
         ├── decisions taken
         └── alternatives rejected
   └── Tool calls (versioned: tool_name@version)
@@ -314,13 +386,24 @@ Redaction runs before anything is written. Traces persist to
 `.traces/trace_<run_id>.json` and to SQLite, and replay needs neither the
 original process nor the original cluster.
 
+Reasoning provenance makes a decision attributable to an exact artifact: `mode`
+says whether it was reached deterministically, by a model, or by falling back
+after a rejected generation, and `model` plus `prompt_version` name which. Usage
+figures are measured on the LLM path and are the fixed per-step estimates on the
+deterministic one -- the trace does not pretend to have metered a call it never
+made.
+
+The usage fields are named `usage_in` / `usage_out` rather than the vendors'
+`prompt_tokens` / `completion_tokens` deliberately: the redactor blanks any key
+containing `token`, and a redacted usage figure would be worse than none.
+
 The live tracer registry is bounded (FIFO, 256 entries) so a long-lived API
 process does not accumulate tracers; durable history lives in the trace files and
 the database.
 
 ---
 
-## 9. Persistence
+## 10. Persistence
 
 | Store | Backend | Contents | Durability |
 | :--- | :--- | :--- | :--- |
@@ -335,7 +418,7 @@ in a freshly constructed orchestrator.
 
 ---
 
-## 10. Production evolution
+## 11. Production evolution
 
 **Current (single node, offline)**
 

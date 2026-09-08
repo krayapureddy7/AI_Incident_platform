@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 import uuid
 import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from pydantic import BaseModel, Field
 
 
@@ -140,6 +140,22 @@ class TraceStep:
     estimated_cost_usd: float
     decisions: List[str]
     rejected_alternatives: List[str]
+    # Reasoning provenance. `mode` records how the step reached its conclusion:
+    # "deterministic" (no model configured), "llm" (a validated generation), or
+    # "fallback:<reason>" (a generation was attempted and rejected). Together
+    # with `model` and `prompt_version` this makes a decision attributable to an
+    # exact artifact, which is what the rollback procedure depends on.
+    #
+    # Usage counts are named to survive redaction: `redact_sensitive_data`
+    # blanks any key containing "token", so `usage_in`/`usage_out` rather than
+    # the vendors' prompt_tokens/completion_tokens.
+    mode: str = "deterministic"
+    model: Optional[str] = None
+    prompt_version: Optional[str] = None
+    validation_result: Optional[str] = None
+    usage_in: int = 0
+    usage_out: int = 0
+    llm_latency_ms: float = 0.0
     timestamp: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat() + "Z")
 
     def to_dict(self) -> Dict[str, Any]:
