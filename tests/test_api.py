@@ -49,6 +49,55 @@ class TestOperationalEndpoints(ApiTestCase):
         body = resp.json()
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["persisted_runs"], 0)
+        self.assertIn("simulation_id", body)
+
+    def test_simulation_reset_changes_simulation_id_and_clears_idempotency(self):
+        """
+        The FE's "Reset/New Simulation" mechanism: independent test runs must
+        not require restarting the API process.
+        """
+        before_id = self.client.get("/health").json()["simulation_id"]
+
+        proposal = {
+            "tool_name": "simulate_restart",
+            "service": "payment-service",
+            "environment": "prod",
+            "tenant": "default",
+            "parameters": {"reason": "flush leaked heap"},
+        }
+        first = self.orchestrator.tool_gateway.execute_proposal(proposal)
+        duplicate = self.orchestrator.tool_gateway.execute_proposal(proposal)
+        self.assertTrue(first["ok"])
+        self.assertEqual(duplicate["error"]["code"], "ALREADY_EXECUTED")
+
+        resp = self.client.post("/simulation/reset")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["status"], "reset")
+        self.assertNotEqual(body["simulation_id"], before_id)
+
+        after_id = self.client.get("/health").json()["simulation_id"]
+        self.assertEqual(after_id, body["simulation_id"])
+
+        # The identical mutation is no longer blocked -- new cluster, new window.
+        retried = self.orchestrator.tool_gateway.execute_proposal(proposal)
+        self.assertTrue(retried["ok"], retried)
+
+    def test_two_incidents_via_the_api_do_not_require_a_restart(self):
+        """
+        Submitting the same incident twice through /incidents, separated by a
+        simulation reset instead of a process restart, must resolve both times.
+        """
+        first = self.client.post("/incidents", json=self._payment_incident())
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(first.json()["status"], "RESOLVED")
+
+        self.assertEqual(self.client.post("/simulation/reset").status_code, 200)
+
+        second = self.client.post("/incidents", json=self._payment_incident())
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(second.json()["status"], "RESOLVED")
+        self.assertEqual(second.json()["proposal"]["tool_name"], "simulate_restart")
 
     def test_tool_catalog_is_published(self):
         resp = self.client.get("/tools")

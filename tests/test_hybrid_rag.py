@@ -36,6 +36,21 @@ class TestKnowledgeAndRAG(unittest.TestCase):
         self.assertIn("citation_snippet", hits[0])
         self.assertEqual(hits[0]["doc_id"], "DOC-RB-PAY-001")
 
+    def test_hybrid_rag_version_filter(self):
+        rag = GLOBAL_HYBRID_RAG
+        hits = rag.search(
+            query="payment-service memory saturation rolling restart",
+            service_filter="payment-service",
+            version_filter="1.0.0",
+            top_k=5,
+        )
+        # Only the postmortem is versioned 1.0.0; the runbook and architecture
+        # spec are both 2.4.0, so they must be excluded by the filter.
+        self.assertTrue(hits)
+        self.assertTrue(all(h["version"] == "1.0.0" for h in hits))
+        self.assertIn("DOC-PM-2025-11", [h["doc_id"] for h in hits])
+        self.assertNotIn("DOC-RB-PAY-001", [h["doc_id"] for h in hits])
+
     def test_knowledge_graph_blast_radius_traversal(self):
         kg = GLOBAL_KNOWLEDGE_GRAPH
         blast = kg.calculate_blast_radius("payment-service")

@@ -26,6 +26,7 @@ from ..agents.verifier import VerifierAgent
 from ..models import Incident, WorkflowState
 from ..llm import LLMProvider, resolve_provider
 from ..persistence.store import IncidentStore
+from ..tools.mock_infrastructure import MockInfrastructureCluster
 from ..tracing.tracer import AuditTracer
 from .checkpointing import build_checkpointer, close_checkpointer
 from .langgraph_workflow import IncidentGraphState, build_incident_graph
@@ -100,7 +101,54 @@ class IncidentOrchestrator:
             step_timeout_sec=self.step_timeout_sec,
         )
 
+        # Identifies the current simulation context: one simulated cluster plus
+        # the Tool Gateway's idempotency window in front of it. Changes only on
+        # `reset_simulation()`, so a caller (the API, a demo script) can tell
+        # whether two runs shared a context without inspecting internals.
+        self.simulation_id = f"SIM-{uuid.uuid4().hex[:8].upper()}"
+
     # -- Lifecycle ----------------------------------------------------------
+    def reset_simulation(self) -> str:
+        """
+        Start a fresh simulated cluster and Tool Gateway, in place.
+
+        This is the "New Simulation" mechanism: an operator (or the FE, via
+        ``POST /simulation/reset``) can get a clean simulated infrastructure
+        state -- no accumulated mutations, no idempotency history -- without
+        restarting the process. It exists because a long-lived process (the
+        HTTP API) otherwise shares one ``MockInfrastructureCluster`` and one
+        ``ToolGateway`` across every incident for the process's entire
+        lifetime: a service a prior incident healed stays healed for every
+        later one, and the idempotency window never expires, which is exactly
+        right *within* a simulation run but wrong to force on someone who
+        wants to run a second, independent one.
+
+        Deliberately narrow: only the simulated infrastructure and the tool
+        boundary in front of it are replaced. ``self.store`` (the durable
+        run/trace catalogue) and existing LangGraph checkpoints are untouched
+        -- audit history is not simulation state, and a run held at
+        ``AWAITING_APPROVAL`` before a reset can still be inspected and
+        resumed after one, since its checkpoint doesn't reference the cluster
+        at all. The knowledge graph and RAG corpus are static reference data,
+        not mutated by any action, so they are not touched either.
+
+        Returns the new ``simulation_id``.
+        """
+        fresh_cluster = MockInfrastructureCluster()
+        self.tool_server = InfraToolServer(fresh_cluster)
+        self.tool_gateway = ToolGateway(
+            client=ToolClient(build_fastmcp_server(self.tool_server))
+        )
+        # The Investigator is the only agent holding a captured gateway
+        # reference (Planner/Ops/Verifier never touch tools directly, per the
+        # permission matrix); the executor and recovery-check nodes read
+        # `self.tool_gateway` off this orchestrator fresh on every call, so
+        # they pick up the new gateway with no further change.
+        self.investigator.tool_gateway = self.tool_gateway
+
+        self.simulation_id = f"SIM-{uuid.uuid4().hex[:8].upper()}"
+        return self.simulation_id
+
     def close(self) -> None:
         """
         Release resources held by the orchestrator.

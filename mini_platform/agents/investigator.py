@@ -32,6 +32,7 @@ from ..llm import LLMProvider, resolve_provider, trace_kwargs
 from ..llm.prompts import INVESTIGATOR_PROMPT_VERSION, investigator_prompt
 from ..models import A2AMessage, AgentRole, MessageType
 from .base import BaseAgent
+from .diagnosis_rules import corroboration_note, corroboration_status
 from .schemas import (
     ROOT_CAUSE_LITERALS,
     InvestigatorEvidence,
@@ -50,7 +51,7 @@ class InvestigatorAgent(BaseAgent):
 
     def __init__(
         self,
-        version: str = "1.5.0",
+        version: str = "1.6.0",
         tool_gateway: Optional[ToolGateway] = None,
         rag: Optional[HybridRAG] = None,
         llm_provider: Optional[LLMProvider] = None,
@@ -78,6 +79,7 @@ class InvestigatorAgent(BaseAgent):
     def _deterministic_diagnosis(
         service: str,
         env: str,
+        symptoms: List[str],
         evidence: Dict[str, Any],
         tool_errors: List[Dict[str, Any]],
     ) -> Tuple[str, str]:
@@ -86,6 +88,14 @@ class InvestigatorAgent(BaseAgent):
 
         The fallback path and the offline default. Returns
         ``(identified_root_cause, diagnosis_summary)``.
+
+        Telemetry -- not the incident's free-text description -- is the only
+        signal this decides on: the corpus's own runbooks warn against
+        "correcting" a real memory leak by scaling instead of restarting, so
+        a vague or mistitled alert must never talk the engine out of what it
+        directly observed. ``symptoms`` (the Planner's classification of that
+        free text) is used only to annotate the summary with whether the
+        report and the telemetry agree -- see ``diagnosis_rules``.
         """
         metrics = evidence["metrics"]
         has_oom_log = any(
@@ -98,27 +108,26 @@ class InvestigatorAgent(BaseAgent):
         p99_ms = metrics.get("p99_latency_ms", 0) or 0
 
         if not metrics and not evidence["logs"]:
-            return (
-                "EVIDENCE_UNAVAILABLE",
+            root_cause = "EVIDENCE_UNAVAILABLE"
+            summary = (
                 "No telemetry could be collected for "
                 f"'{service}' in environment '{env}'. "
-                f"Blocked reads: {[e['code'] for e in tool_errors]}.",
+                f"Blocked reads: {[e['code'] for e in tool_errors]}."
             )
-        if has_oom_log or memory_pct > 90.0:
-            return (
-                "MEMORY_LEAK_HEAP_EXHAUSTION",
+        elif has_oom_log or memory_pct > 90.0:
+            root_cause = "MEMORY_LEAK_HEAP_EXHAUSTION"
+            summary = (
                 f"Heap memory saturated at {memory_pct}%, p99 latency at {p99_ms}ms, "
-                "OOM error present in logs.",
+                "OOM error present in logs."
             )
-        if cpu_pct > 90.0:
-            return (
-                "CPU_AND_CONNECTION_SATURATION",
-                f"CPU saturated at {cpu_pct}%, high connection pool backpressure.",
-            )
-        return (
-            "SERVICE_UNRESPONSIVE",
-            f"Elevated error rate {metrics.get('error_rate_pct')}% with p99 {p99_ms}ms.",
-        )
+        elif cpu_pct > 90.0:
+            root_cause = "CPU_AND_CONNECTION_SATURATION"
+            summary = f"CPU saturated at {cpu_pct}%, high connection pool backpressure."
+        else:
+            root_cause = "SERVICE_UNRESPONSIVE"
+            summary = f"Elevated error rate {metrics.get('error_rate_pct')}% with p99 {p99_ms}ms."
+
+        return root_cause, summary + corroboration_note(root_cause, symptoms)
 
     def _diagnose(
         self,
@@ -141,7 +150,7 @@ class InvestigatorAgent(BaseAgent):
         remediation.
         """
         fallback = lambda: self._deterministic_diagnosis(  # noqa: E731
-            service, env, evidence, tool_errors
+            service, env, symptoms, evidence, tool_errors
         )
 
         if self.llm is None:
@@ -277,6 +286,12 @@ class InvestigatorAgent(BaseAgent):
         evidence["identified_root_cause"] = root_cause
         evidence["diagnosis_summary"] = summary
 
+        # Computed regardless of reasoning mode, so an LLM-accepted diagnosis
+        # gets the same visibility as the deterministic one: root cause stays
+        # evidence-driven either way, but a mismatch between what the incident
+        # reported and what the telemetry shows is never silent.
+        corroboration = corroboration_status(root_cause, validated_input.symptoms)
+
         decisions = [
             f"Evidence collected via Tool Gateway: {len(evidence['logs'])} log lines, "
             f"{'telemetry metrics' if metrics else 'no metrics'}, "
@@ -287,6 +302,8 @@ class InvestigatorAgent(BaseAgent):
         ]
         if mode != "deterministic":
             decisions.append(f"Root-cause reasoning mode: {mode}.")
+        if corroboration != "N/A":
+            decisions.append(f"Symptom/evidence corroboration: {corroboration}.")
         if tool_errors:
             decisions.append(
                 "Gateway rejected "

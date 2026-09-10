@@ -64,8 +64,23 @@ export interface HealthResponse {
   persisted_runs: number;
   session_environment: string;
   session_tenant: string;
+  simulation_id: string;
 }
 export const getHealth = () => get<HealthResponse>("/health");
+
+export interface SimulationResetResponse {
+  status: string;
+  simulation_id: string;
+  message: string;
+}
+/**
+ * Starts a fresh simulation context: a clean simulated cluster and a clean
+ * Tool Gateway idempotency window, without restarting the backend process.
+ * Use this between independent test/demo incidents on the same service --
+ * otherwise a service a prior incident healed stays healed, and a mutation
+ * identical to one already dispatched keeps returning ALREADY_EXECUTED.
+ */
+export const resetSimulation = () => post<SimulationResetResponse>("/simulation/reset", {});
 
 // ---------------------------------------------------------------------------
 // Tools

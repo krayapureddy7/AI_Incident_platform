@@ -28,7 +28,7 @@ from ..persistence.store import IncidentStore
 from ..safety.guardrails import GLOBAL_SAFETY_GUARDRAILS
 from ..tracing.tracer import TraceReplayer, redact_sensitive_data
 
-API_VERSION = "1.1.0"
+API_VERSION = "1.2.0"
 PLATFORM_VERSION = "1.4.0"
 
 #: Session authority for this deployment.
@@ -95,6 +95,7 @@ class KnowledgeQueryRequest(BaseModel):
     service: Optional[str] = Field(default=None, description="Service metadata filter")
     environment: Optional[str] = Field(default=None, description="Environment metadata filter")
     doc_type: Optional[str] = Field(default=None, description="Document type metadata filter")
+    version: Optional[str] = Field(default=None, description="Document version metadata filter")
     top_k: int = Field(default=3, ge=1, le=10, description="Maximum results to return")
 
 
@@ -131,6 +132,14 @@ class RedactionPreviewRequest(BaseModel):
     data: Dict[str, Any] = Field(..., description="JSON object to redact")
 
 
+class SimulationResetResponse(BaseModel):
+    """Result of starting a fresh simulation context."""
+
+    status: str
+    simulation_id: str
+    message: str
+
+
 class HealthResponse(BaseModel):
     status: str
     platform_version: str
@@ -141,6 +150,14 @@ class HealthResponse(BaseModel):
     )
     session_tenant: str = Field(
         ..., description="Tenant this deployment is authorized to act on"
+    )
+    simulation_id: str = Field(
+        ...,
+        description=(
+            "Identifies the current simulated-cluster/idempotency context. "
+            "Changes on POST /simulation/reset; unchanged since means every "
+            "run so far shares one simulated infrastructure state."
+        ),
     )
 
 
@@ -210,6 +227,32 @@ def create_app(
             persisted_runs=incident_store.count_runs(),
             session_environment=env_authority,
             session_tenant=tenant_authority,
+            simulation_id=engine.simulation_id,
+        )
+
+    @app.post(
+        "/simulation/reset",
+        response_model=SimulationResetResponse,
+        tags=["operations"],
+    )
+    def reset_simulation() -> SimulationResetResponse:
+        """
+        Start a fresh simulation context: a clean simulated cluster and a
+        clean Tool Gateway idempotency window, in this same running process.
+
+        Use this between independent test/demo runs instead of restarting the
+        API -- a service a prior incident healed (or scaled, or restarted)
+        would otherwise stay that way for every later incident, and a
+        mutation identical to one already dispatched would otherwise keep
+        returning ``ALREADY_EXECUTED`` indefinitely. Persisted run history
+        (``GET /incidents``, ``GET /traces/{run_id}``) is unaffected -- this
+        resets simulated infrastructure, not the audit trail.
+        """
+        simulation_id = engine.reset_simulation()
+        return SimulationResetResponse(
+            status="reset",
+            simulation_id=simulation_id,
+            message="New simulation context started: cluster and idempotency window are clean.",
         )
 
     @app.get("/tools", tags=["tools"])
@@ -347,6 +390,7 @@ def create_app(
             service_filter=payload.service,
             env_filter=payload.environment,
             type_filter=payload.doc_type,
+            version_filter=payload.version,
             top_k=payload.top_k,
         )
         return {"query": payload.query, "count": len(hits), "results": hits}

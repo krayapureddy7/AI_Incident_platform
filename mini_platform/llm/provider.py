@@ -43,7 +43,14 @@ MAX_ATTEMPTS_ENV_VAR = "LLM_MAX_ATTEMPTS"
 API_KEY_ENV_VARS = {
     "gemini": "GEMINI_API_KEY",
     "groq": "GROQ_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
+
+#: OpenRouter-specific overrides, kept separate from ``LLM_MODEL``/``MODEL_ENV_VAR``
+#: so that when OpenRouter is used as Gemini's fallback (see ``resolve_provider``)
+#: it does not inherit Gemini's model id.
+OPENROUTER_MODEL_ENV_VAR = "OPENROUTER_MODEL"
+OPENROUTER_FALLBACK_MODELS_ENV_VAR = "OPENROUTER_FALLBACK_MODELS"
 
 #: Default model per provider. Overridable with ``LLM_MODEL``.
 #:
@@ -56,7 +63,12 @@ API_KEY_ENV_VARS = {
 DEFAULT_MODELS = {
     "gemini": "gemini-3.5-flash",
     "groq": "llama-3.3-70b-versatile",
+    "openrouter": "google/gemma-4-26b-a4b-it:free",
 }
+
+#: OpenRouter models tried, in order, after the primary OpenRouter model, both
+#: when OpenRouter is selected directly and when it stands in for Gemini.
+DEFAULT_OPENROUTER_FALLBACK_MODELS = ["nvidia/nemotron-3-ultra-550b-a55b:free"]
 
 #: Wall-clock budget for a single generation. Deliberately shorter than the
 #: LLM-bearing graph nodes' timeout so the provider fails into the deterministic
@@ -343,11 +355,21 @@ def resolve_provider() -> Optional[LLMProvider]:
         if selected == "gemini":
             from .gemini import GeminiProvider
 
-            return GeminiProvider(
+            gemini = GeminiProvider(
                 model=model or DEFAULT_MODELS["gemini"],
                 timeout_sec=timeout_sec,
                 max_attempts=max_attempts,
             )
+            # Gemini's free tier is the one most likely to be rate-limited or
+            # briefly unavailable. When OpenRouter is also configured, route
+            # around a Gemini failure to it rather than dropping straight to
+            # deterministic reasoning.
+            openrouter = _build_openrouter(timeout_sec, max_attempts)
+            if openrouter is None:
+                return gemini
+            from .fallback import FallbackProvider
+
+            return FallbackProvider(gemini, openrouter)
         if selected == "groq":
             from .groq import GroqProvider
 
@@ -356,8 +378,37 @@ def resolve_provider() -> Optional[LLMProvider]:
                 timeout_sec=timeout_sec,
                 max_attempts=max_attempts,
             )
+        if selected == "openrouter":
+            return _build_openrouter(timeout_sec, max_attempts, model=model)
     except ImportError:
         # The SDK is an optional extra. A missing package is a configuration
         # gap, not a crash: fall back to deterministic reasoning.
         return None
     return None
+
+
+def _build_openrouter(
+    timeout_sec: float, max_attempts: int, model: str = ""
+) -> Optional[LLMProvider]:
+    """
+    Build an :class:`OpenRouterProvider`, or ``None`` if it is not configured.
+
+    Shared by the direct ``LLM_PROVIDER=openrouter`` path and the Gemini
+    fallback path in :func:`resolve_provider`, so both honour the same model
+    and fallback-model overrides.
+    """
+    if not os.environ.get(API_KEY_ENV_VARS["openrouter"]):
+        return None
+
+    from .openrouter import OpenRouterProvider
+
+    fallback_models_raw = os.environ.get(OPENROUTER_FALLBACK_MODELS_ENV_VAR, "")
+    fallback_models = [m.strip() for m in fallback_models_raw.split(",") if m.strip()] or list(
+        DEFAULT_OPENROUTER_FALLBACK_MODELS
+    )
+    return OpenRouterProvider(
+        model=model or os.environ.get(OPENROUTER_MODEL_ENV_VAR) or DEFAULT_MODELS["openrouter"],
+        fallback_models=fallback_models,
+        timeout_sec=timeout_sec,
+        max_attempts=max_attempts,
+    )

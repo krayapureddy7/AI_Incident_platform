@@ -198,6 +198,95 @@ class TestOrchestratorPersistence(unittest.TestCase):
         self.assertIn("CROSS_ENVIRONMENT_VIOLATION", persisted["reason"])
 
 
+class TestSimulationReset(unittest.TestCase):
+    """
+    ``reset_simulation()`` is the "New Simulation" mechanism: a long-lived
+    orchestrator (the HTTP API) otherwise shares one simulated cluster and one
+    Tool Gateway idempotency window across its entire process lifetime, so an
+    independent second run either inherits the first run's healed telemetry or
+    is blocked as a duplicate. These tests assert the two properties that must
+    both hold: a reset genuinely starts fresh, and idempotency is completely
+    unweakened when no reset happens.
+    """
+
+    def _duplicate_proposal(self):
+        return {
+            "tool_name": "simulate_restart",
+            "service": "payment-service",
+            "environment": "prod",
+            "tenant": "default",
+            "parameters": {"reason": "flush leaked heap"},
+        }
+
+    def test_duplicate_is_still_blocked_within_one_simulation_context(self):
+        """Scenario 07's invariant, asserted directly: unchanged by this feature."""
+        orchestrator = build_isolated_orchestrator()
+        proposal = self._duplicate_proposal()
+
+        first = orchestrator.tool_gateway.execute_proposal(proposal)
+        second = orchestrator.tool_gateway.execute_proposal(proposal)
+
+        self.assertTrue(first["ok"])
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["error"]["code"], "ALREADY_EXECUTED")
+
+    def test_reset_clears_idempotency_so_the_same_action_can_run_again(self):
+        orchestrator = build_isolated_orchestrator()
+        proposal = self._duplicate_proposal()
+
+        first = orchestrator.tool_gateway.execute_proposal(proposal)
+        blocked = orchestrator.tool_gateway.execute_proposal(proposal)
+        self.assertTrue(first["ok"])
+        self.assertEqual(blocked["error"]["code"], "ALREADY_EXECUTED")
+
+        old_simulation_id = orchestrator.simulation_id
+        new_simulation_id = orchestrator.reset_simulation()
+        self.assertNotEqual(new_simulation_id, old_simulation_id)
+        self.assertEqual(orchestrator.simulation_id, new_simulation_id)
+
+        # The identical action is no longer a duplicate of anything -- the
+        # idempotency window and the cluster it mutated are both new.
+        after_reset = orchestrator.tool_gateway.execute_proposal(proposal)
+        self.assertTrue(after_reset["ok"], after_reset)
+
+    def test_investigator_is_rebound_to_the_new_gateway(self):
+        orchestrator = build_isolated_orchestrator()
+        orchestrator.reset_simulation()
+        self.assertIs(orchestrator.investigator.tool_gateway, orchestrator.tool_gateway)
+
+    def test_two_independent_incidents_run_sequentially_without_a_restart(self):
+        """
+        Mirrors the FE workflow: run an incident, reset instead of restarting
+        the process, then run another. Both must resolve on their own merits
+        -- the second is not shadowed by the first run's healed telemetry or
+        blocked as a duplicate of it.
+        """
+        orchestrator = build_isolated_orchestrator()
+        incident = Incident(
+            id="INC-SIM-1",
+            title="Payment OOM",
+            description="payment-service OOMKilled, memory 96%",
+            service="payment-service",
+            environment="prod",
+        )
+
+        first = orchestrator.run_incident(incident=incident, run_id="RUN-SIM-1")
+        self.assertEqual(first["status"], "RESOLVED")
+        self.assertEqual(first["proposal"]["tool_name"], "simulate_restart")
+
+        orchestrator.reset_simulation()
+
+        second = orchestrator.run_incident(incident=incident, run_id="RUN-SIM-2")
+        self.assertEqual(second["status"], "RESOLVED")
+        self.assertEqual(second["proposal"]["tool_name"], "simulate_restart")
+        # A fresh cluster means the second run observed the same saturated
+        # telemetry the first one did, not the first run's healed aftermath.
+        self.assertEqual(
+            second["execution_result"]["data"]["post_action_metrics"]["status"],
+            "HEALTHY",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 

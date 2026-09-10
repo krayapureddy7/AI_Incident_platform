@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   XCircle,
   RotateCcw,
+  RefreshCw,
   KeyRound,
   Activity,
   Loader2,
@@ -17,9 +18,11 @@ import {
   EvalScenarioSummary,
   ServiceGraphNode,
   approveIncident,
+  getHealth,
   listEvalScenarios,
   listServices,
   replayTrace,
+  resetSimulation,
   submitIncident,
 } from "../utils/apiClient";
 
@@ -60,6 +63,10 @@ export const IncidentStudio: React.FC = () => {
   const [replayOpen, setReplayOpen] = useState<boolean>(false);
   const [replayLoading, setReplayLoading] = useState<boolean>(false);
 
+  const [simulationId, setSimulationId] = useState<string | null>(null);
+  const [isResettingSimulation, setIsResettingSimulation] = useState<boolean>(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+
   useEffect(() => {
     Promise.all([listServices(), listEvalScenarios()])
       .then(([servicesRes, scenariosRes]) => {
@@ -67,7 +74,29 @@ export const IncidentStudio: React.FC = () => {
         setScenarios(scenariosRes.scenarios);
       })
       .catch((err) => setLoadError(err instanceof ApiError ? err.message : String(err)));
+    getHealth()
+      .then((health) => setSimulationId(health.simulation_id))
+      .catch(() => {
+        /* Surfaced already by the services/scenarios load error above. */
+      });
   }, []);
+
+  const handleResetSimulation = () => {
+    setIsResettingSimulation(true);
+    setResetError(null);
+    resetSimulation()
+      .then((res) => {
+        setSimulationId(res.simulation_id);
+        // Prior results reference the simulation context that just went away.
+        setResult(null);
+        setReplayText(null);
+        setReplayOpen(false);
+        setApprovalToken("");
+        setApproveError(null);
+      })
+      .catch((err) => setResetError(err instanceof ApiError ? err.message : String(err)))
+      .finally(() => setIsResettingSimulation(false));
+  };
 
   const handleLoadScenario = (sc: EvalScenarioSummary) => {
     setSelectedScenarioId(sc.id);
@@ -210,10 +239,40 @@ export const IncidentStudio: React.FC = () => {
 
       {/* Incident Input & Controls */}
       <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-4">
-        <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-          <Activity className="w-4 h-4 text-blue-600" />
-          <h3 className="text-sm font-semibold text-slate-900">Incident Definition</h3>
+        <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-3">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-blue-600" />
+            <h3 className="text-sm font-semibold text-slate-900">Incident Definition</h3>
+          </div>
+          <div className="flex items-center gap-2">
+            {simulationId && (
+              <span
+                title="Identifies the current simulated cluster and idempotency window. Changes on reset."
+                className="text-[10px] font-mono text-slate-400"
+              >
+                {simulationId}
+              </span>
+            )}
+            <button
+              id="reset-simulation-btn"
+              type="button"
+              disabled={isResettingSimulation}
+              onClick={handleResetSimulation}
+              title="Start a fresh simulated cluster and clear the idempotency window, without restarting the backend -- use this between independent test/demo incidents on the same service."
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-slate-200 text-[11px] font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 disabled:opacity-50 transition-colors"
+            >
+              <RefreshCw className={`w-3 h-3 ${isResettingSimulation ? "animate-spin" : ""}`} />
+              {isResettingSimulation ? "Resetting..." : "New Simulation"}
+            </button>
+          </div>
         </div>
+
+        {resetError && (
+          <div className="flex items-center gap-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            {resetError}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div>

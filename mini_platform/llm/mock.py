@@ -19,10 +19,11 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Type
 
 from pydantic import BaseModel
 
+from ..agents.diagnosis_rules import corroboration_note
 from .provider import LLMProvider
 
 #: Version of the offline provider implementations.
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 
 def _first_match(text: str, needles: Iterable[str]) -> bool:
@@ -124,6 +125,12 @@ class MockProvider(LLMProvider):
         for chunk in prompt.split('"doc_id": "')[1:]:
             doc_ids.append(chunk.split('"')[0])
 
+        symptoms_text = _section(prompt, "Reported symptoms: ", "\n\nMetrics:")
+        try:
+            symptoms = json.loads(symptoms_text) if symptoms_text.strip() else []
+        except (ValueError, TypeError):
+            symptoms = []
+
         metrics = _section(prompt, "Metrics:", "Logs:")
         logs = _section(prompt, "Logs:", "Retrieved documents:")
 
@@ -144,7 +151,7 @@ class MockProvider(LLMProvider):
 
         return {
             "identified_root_cause": root_cause,
-            "diagnosis_summary": summary,
+            "diagnosis_summary": summary + corroboration_note(root_cause, symptoms),
             "cited_doc_ids": doc_ids[:1],
         }
 

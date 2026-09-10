@@ -133,6 +133,23 @@ class TestInvestigatorReasoning(unittest.TestCase):
             [c["doc_id"] for c in b],
         )
 
+    def test_mock_provider_flags_uncorroborated_diagnosis_without_changing_it(self):
+        """
+        MockProvider mirrors the deterministic rules, including the
+        corroboration check: an incident whose reported symptoms don't
+        support the telemetry-derived root cause still gets that same root
+        cause (evidence is authoritative either way), but the mismatch is
+        recorded in the summary just as it is on the fully deterministic path.
+        """
+        state = self._state()
+        state["plan"] = {"symptoms": ["UNKNOWN_DEGRADATION"], "delegated_tasks": []}
+        agent = InvestigatorAgent(tool_gateway=self.gateway, llm_provider=MockProvider())
+
+        evidence = agent.run_node(state)["evidence"]
+
+        self.assertEqual(evidence["identified_root_cause"], "MEMORY_LEAK_HEAP_EXHAUSTION")
+        self.assertIn("UNCORROBORATED", evidence["diagnosis_summary"])
+
 
 class TestOpsReasoning(unittest.TestCase):
     def _state(self, root_cause="MEMORY_LEAK_HEAP_EXHAUSTION"):

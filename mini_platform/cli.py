@@ -141,6 +141,7 @@ def _build_parser() -> argparse.ArgumentParser:
     rag_parser.add_argument("--service", default=None, help="Service metadata filter")
     rag_parser.add_argument("--env", default=None, help="Environment metadata filter")
     rag_parser.add_argument("--type", dest="doc_type", default=None, help="Document type filter")
+    rag_parser.add_argument("--version", dest="doc_version", default=None, help="Document version metadata filter")
     rag_parser.add_argument("--top-k", type=int, default=3, help="Results to return")
 
     blast_parser = subparsers.add_parser(
@@ -306,6 +307,7 @@ def main(argv: Optional[list] = None) -> int:
                 service_filter=args.service,
                 env_filter=args.env,
                 type_filter=args.doc_type,
+                version_filter=args.doc_version,
                 top_k=args.top_k,
             )
         )

@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Optional, Set
 from .corpus import KNOWLEDGE_DOCUMENTS
 
 #: Version of the retrieval pipeline (BM25 + dense projection + RRF).
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 
 STOPWORDS: Set[str] = {
@@ -173,6 +173,7 @@ class HybridRAG:
         service_filter: Optional[str] = None,
         env_filter: Optional[str] = None,
         type_filter: Optional[str] = None,
+        version_filter: Optional[str] = None,
         top_k: int = 3
     ) -> List[Dict[str, Any]]:
         """
@@ -212,6 +213,8 @@ class HybridRAG:
             if env_filter and doc.get("env") != env_filter:
                 continue
             if type_filter and doc.get("type") != type_filter:
+                continue
+            if version_filter and doc.get("version") != version_filter:
                 continue
 
             # Extract highest relevance excerpt / snippet

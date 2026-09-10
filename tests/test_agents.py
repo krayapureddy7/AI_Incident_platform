@@ -65,6 +65,54 @@ class TestAgentWorkflows(unittest.TestCase):
         evidence = inv_reply.payload["evidence"]
         self.assertEqual(evidence["identified_root_cause"], "MEMORY_LEAK_HEAP_EXHAUSTION")
         self.assertGreater(len(evidence["citations"]), 0)
+        # Reported symptoms (memory/leak keywords) corroborate the telemetry-derived
+        # root cause here, so the summary carries no corroboration caveat at all.
+        self.assertNotIn("corroboration", evidence["diagnosis_summary"].lower())
+
+    def test_investigator_flags_uncorroborated_diagnosis_without_changing_it(self):
+        """
+        A description with no matching keywords (e.g. a Kafka-lag alert) on
+        payment-service still yields MEMORY_LEAK_HEAP_EXHAUSTION -- the static
+        telemetry never varies with incident text, and telemetry is the only
+        signal this decides on. What must change is that the mismatch between
+        the reported symptom(s) and the evidence is now visible, both in the
+        summary text and as a distinct decision in the audit trace.
+        """
+        kafka_incident = Incident(
+            id="TEST-INC-KAFKA",
+            title="Kafka Consumer Lag Alert",
+            description="Kafka consumer lag high, payment processing delayed",
+            service="payment-service",
+            environment="prod",
+        )
+        planner = PlannerAgent()
+        planner_reply = planner.handle_message(
+            A2AMessage(
+                sender=AgentRole.ORCHESTRATOR,
+                recipient=AgentRole.PLANNER,
+                message_type=MessageType.TASK_DELEGATION,
+                correlation_id="TEST-CORR-KAFKA",
+                payload={"incident": kafka_incident.to_dict()},
+            ),
+            self.context,
+        )
+        self.assertEqual(planner_reply.payload["symptoms"], ["UNKNOWN_DEGRADATION"])
+
+        investigator = InvestigatorAgent(tool_gateway=self.gateway)
+        inv_reply = investigator.handle_message(planner_reply, self.context)
+        evidence = inv_reply.payload["evidence"]
+
+        # Root cause stays evidence-driven -- unchanged from the OOM case above.
+        self.assertEqual(evidence["identified_root_cause"], "MEMORY_LEAK_HEAP_EXHAUSTION")
+        # But the mismatch is now visible rather than silent.
+        self.assertIn("UNCORROBORATED", evidence["diagnosis_summary"])
+
+        step = next(
+            s for s in self.tracer.steps if s.step_id == "STEP-INVESTIGATOR-01"
+        )
+        self.assertTrue(
+            any("Symptom/evidence corroboration" in d for d in step.decisions)
+        )
 
     def test_ops_agent_action_proposal(self):
         # Synthetic evidence report, so the Ops assertions do not depend on the
