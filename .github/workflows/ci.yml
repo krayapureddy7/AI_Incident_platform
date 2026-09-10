@@ -2,9 +2,9 @@ name: CI - Tests, Tool Contracts & Eval Gate
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, dev, "feature/**"]
   pull_request:
-    branches: [main, master]
+    branches: [main, master, dev]
 
 env:
   PYTHONPATH: .
@@ -104,3 +104,36 @@ jobs:
         # behaviour change cannot ship without a version bump and a rollback
         # target.
         run: python -m tools.check_versions
+
+  promote-to-dev:
+    name: Auto-promote feature branch to dev
+    runs-on: ubuntu-latest
+    # Only a push (not a PR) to a feature/** branch promotes -- and only once
+    # every gate above (tests, eval, version manifest) has passed on that
+    # exact commit. A feature branch merged straight to main via PR bypasses
+    # this job entirely; dev is purely a green-build integration branch fed by
+    # feature branches, never the other way around.
+    needs: [test, eval-gate, versioning]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/feature/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge into dev and push
+        # Merges the exact commit that just passed CI (not a re-fetched branch
+        # tip, which could have moved) into dev, fast-forwarding dev's history
+        # rather than rewriting it. `[skip ci]` avoids a redundant second CI
+        # run on dev for a merge commit that already passed as this commit.
+        run: |
+          git fetch origin dev
+          git checkout -B dev origin/dev
+          git merge --no-ff "${GITHUB_SHA}" -m "Auto-promote ${GITHUB_SHA::7} from ${GITHUB_REF_NAME} to dev [skip ci]"
+          git push origin dev
