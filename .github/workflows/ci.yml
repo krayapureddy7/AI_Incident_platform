@@ -130,10 +130,12 @@ jobs:
       - name: Merge into dev and push
         # Merges the exact commit that just passed CI (not a re-fetched branch
         # tip, which could have moved) into dev, fast-forwarding dev's history
-        # rather than rewriting it. `[skip ci]` avoids a redundant second CI
-        # run on dev for a merge commit that already passed as this commit.
+        # rather than rewriting it. No `[skip ci]` here: the push below
+        # triggers this same workflow again on dev, so the merge commit itself
+        # gets its own independent test/eval-gate/versioning run rather than
+        # merely inheriting the feature branch's result.
         run: |
           git fetch origin dev
           git checkout -B dev origin/dev
-          git merge --no-ff "${GITHUB_SHA}" -m "Auto-promote ${GITHUB_SHA::7} from ${GITHUB_REF_NAME} to dev [skip ci]"
+          git merge --no-ff "${GITHUB_SHA}" -m "Auto-promote ${GITHUB_SHA::7} from ${GITHUB_REF_NAME} to dev"
           git push origin dev
